@@ -19,6 +19,7 @@
       "pluginName": "ExtendedItems",
       "repository": "liamtolkki/ExtendedItems",
       "assetPattern": "^extendeditems-.*\\.jar$",
+      "checksumAssetPattern": null,
       "installedFile": "ExtendedItems.jar",
       "installedFilePatterns": [
         "^ExtendedItems\\.jar$",
@@ -31,6 +32,7 @@
       "pluginName": "ExtendedUI",
       "repository": "liamtolkki/ExtendedUI",
       "assetPattern": "^extendedui-.*\\.jar$",
+      "checksumAssetPattern": null,
       "installedFile": "ExtendedUI.jar",
       "installedFilePatterns": [
         "^ExtendedUI\\.jar$",
