@@ -68,36 +68,6 @@ function ConvertTo-PluginManagerHashtable {
     return $Value
 }
 
-function ConvertTo-PluginManagerHashtable {
-    param($Value)
-
-    if ($null -eq $Value) {
-        return $null
-    }
-    if ($Value -is [System.Collections.IDictionary]) {
-        $result = @{}
-        foreach ($key in $Value.Keys) {
-            $result[[string]$key] = ConvertTo-PluginManagerHashtable $Value[$key]
-        }
-        return $result
-    }
-    if ($Value -is [System.Management.Automation.PSCustomObject]) {
-        $result = @{}
-        foreach ($property in $Value.PSObject.Properties) {
-            $result[$property.Name] = ConvertTo-PluginManagerHashtable $property.Value
-        }
-        return $result
-    }
-    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
-        $items = @()
-        foreach ($item in $Value) {
-            $items += ,(ConvertTo-PluginManagerHashtable $item)
-        }
-        return $items
-    }
-    return $Value
-}
-
 function Read-JsonHashtable {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -1177,6 +1147,7 @@ Export-ModuleMember -Function @(
     "Resolve-ReleaseAsset",
     "Get-ExpectedSha256"
 )
+
 
 
 
