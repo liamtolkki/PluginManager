@@ -33,8 +33,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-Import-Module (Join-Path $PSScriptRoot "PluginManager.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "PluginManager.Orchestration.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "PluginManager.psm1") -Force
 
 $catalog = Get-PluginCatalog -CatalogPath $CatalogPath
 Assert-CatalogDependencyGraph -Catalog $catalog
