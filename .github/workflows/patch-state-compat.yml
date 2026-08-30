@@ -1,0 +1,104 @@
+name: Patch state compatibility
+
+on:
+  push:
+    paths:
+      - .github/workflows/patch-state-compat.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout PluginManager
+        uses: actions/checkout@v6
+
+      - name: Patch state parser
+        shell: pwsh
+        run: |
+          $path = "PluginManager.psm1"
+          $content = Get-Content -Path $path -Raw
+          $pattern = '(?s)function Read-JsonHashtable \{.*?\r?\n\}\r?\n\r?\nfunction Write-JsonAtomic'
+
+          $replacement = @(
+            'function ConvertTo-PluginManagerHashtable {'
+            '    param($Value)'
+            ''
+            '    if ($null -eq $Value) {'
+            '        return $null'
+            '    }'
+            '    if ($Value -is [System.Collections.IDictionary]) {'
+            '        $result = [ordered]@{}'
+            '        foreach ($key in $Value.Keys) {'
+            '            $result[[string]$key] = ConvertTo-PluginManagerHashtable $Value[$key]'
+            '        }'
+            '        return $result'
+            '    }'
+            '    if ($Value -is [System.Management.Automation.PSCustomObject]) {'
+            '        $result = [ordered]@{}'
+            '        foreach ($property in $Value.PSObject.Properties) {'
+            '            $result[$property.Name] = ConvertTo-PluginManagerHashtable $property.Value'
+            '        }'
+            '        return $result'
+            '    }'
+            '    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {'
+            '        $items = @()'
+            '        foreach ($item in $Value) {'
+            '            $items += ,(ConvertTo-PluginManagerHashtable $item)'
+            '        }'
+            '        return $items'
+            '    }'
+            '    return $Value'
+            '}'
+            ''
+            'function Read-JsonHashtable {'
+            '    param([Parameter(Mandatory)][string]$Path)'
+            ''
+            '    if (-not (Test-Path -LiteralPath $Path)) {'
+            '        return $null'
+            '    }'
+            ''
+            '    $parsed = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json'
+            '    return ConvertTo-PluginManagerHashtable $parsed'
+            '}'
+            ''
+            'function Write-JsonAtomic'
+          ) -join "`n"
+
+          $regex = [regex]::new($pattern)
+          if (-not $regex.IsMatch($content)) {
+            throw "Expected Read-JsonHashtable implementation was not found."
+          }
+
+          $content = $regex.Replace($content, $replacement, 1)
+          Set-Content -Path $path -Value $content -Encoding utf8
+
+      - name: Validate Windows PowerShell 5.1 state parsing
+        shell: powershell
+        run: |
+          Import-Module .\PluginManager.psm1 -Force
+          $path = Join-Path $env:RUNNER_TEMP 'state.json'
+          '{"schemaVersion":1,"plugins":{"sanctuary":{"version":"0.1.0-alpha.1","enabled":true}}}' | Set-Content -Path $path -Encoding UTF8
+          & (Get-Module PluginManager) {
+            param($StatePath)
+            $state = Get-ManagerState -Path $StatePath
+            if (-not $state.plugins.ContainsKey('sanctuary')) {
+              throw 'Expected Sanctuary state record.'
+            }
+            if ($state.plugins['sanctuary'].version -ne '0.1.0-alpha.1') {
+              throw 'Unexpected Sanctuary state version.'
+            }
+          } $path
+
+      - name: Commit patch
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PluginManager.psm1
+          git commit -m "Fix Windows PowerShell state parsing"
+          git pull --rebase origin main
+          git push origin main
