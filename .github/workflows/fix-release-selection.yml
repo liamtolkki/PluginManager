@@ -1,0 +1,102 @@
+name: Fix release selection
+
+on:
+  push:
+    paths:
+      - .github/workflows/fix-release-selection.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout PluginManager
+        uses: actions/checkout@v6
+
+      - name: Patch release selection
+        shell: pwsh
+        run: |
+          $path = "PluginManager.psm1"
+          $content = Get-Content -Path $path -Raw
+          $pattern = '(?s)function Get-GitHubRelease \{.*?\r?\n\}\r?\n\r?\nfunction Resolve-ReleaseAsset'
+
+          $replacement = @(
+            'function Select-GitHubRelease {'
+            '    param('
+            '        [Parameter(Mandatory)]$Releases,'
+            '        [ValidateSet("Stable", "Prerelease")][string]$Channel = "Stable"'
+            '    )'
+            ''
+            '    foreach ($release in $Releases) {'
+            '        $isDraft = [bool](Get-OptionalValue -Object $release -Name "draft" -Default $false)'
+            '        if ($isDraft) {'
+            '            continue'
+            '        }'
+            ''
+            '        $isPrerelease = [bool](Get-OptionalValue -Object $release -Name "prerelease" -Default $false)'
+            '        if ($Channel -eq "Prerelease" -and $isPrerelease) {'
+            '            return $release'
+            '        }'
+            '        if ($Channel -eq "Stable" -and -not $isPrerelease) {'
+            '            return $release'
+            '        }'
+            '    }'
+            ''
+            '    return $null'
+            '}'
+            ''
+            'function Get-GitHubRelease {'
+            '    [CmdletBinding()]'
+            '    param('
+            '        [Parameter(Mandatory)][string]$Repository,'
+            '        [string]$Version,'
+            '        [ValidateSet("Stable", "Prerelease")][string]$Channel = "Stable"'
+            '    )'
+            ''
+            '    if ($Version) {'
+            '        $tag = if ($Version.StartsWith("v", [System.StringComparison]::OrdinalIgnoreCase)) { $Version } else { "v$Version" }'
+            '        $encoded = [System.Uri]::EscapeDataString($tag)'
+            '        return Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/tags/$encoded" -Headers $script:GitHubHeaders -Method Get'
+            '    }'
+            ''
+            '    $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases?per_page=100" -Headers $script:GitHubHeaders -Method Get'
+            '    $selected = Select-GitHubRelease -Releases $response -Channel $Channel'
+            ''
+            '    if (-not $selected) {'
+            '        throw "No $Channel release is available for $Repository."'
+            '    }'
+            '    return $selected'
+            '}'
+            ''
+            'function Resolve-ReleaseAsset'
+          ) -join "`n"
+
+          $regex = [regex]::new($pattern)
+          if (-not $regex.IsMatch($content)) {
+            throw "Expected Get-GitHubRelease implementation was not found."
+          }
+
+          $content = $regex.Replace($content, $replacement, 1)
+          Set-Content -Path $path -Value $content -Encoding utf8
+
+      - name: Validate Windows PowerShell 5.1 behavior
+        shell: powershell
+        run: |
+          Import-Module .\PluginManager.psm1 -Force
+          $release = Get-GitHubRelease -Repository "liamtolkki/ExtendedItems" -Channel Prerelease
+          if (-not $release.prerelease) {
+            throw "Expected an ExtendedItems prerelease."
+          }
+          Write-Host "Selected $($release.tag_name)"
+
+      - name: Commit fix
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PluginManager.psm1
+          git commit -m "Fix Windows PowerShell prerelease selection"
+          git push origin main
