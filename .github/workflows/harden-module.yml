@@ -39,23 +39,29 @@ jobs:
             $content = $content.Replace($replacement.Key, $replacement.Value)
           }
 
-          $oldDirectories = '    foreach ($path in @($Paths.Plugins, $Paths.Disabled, $Paths.Root, $Paths.Downloads, $Paths.Backups)) {' + "`n" + '        New-Item -ItemType Directory -Path $path -Force | Out-Null' + "`n" + '    }'
-          $newDirectories = @'
-    if (-not (Test-Path -LiteralPath $Paths.Server -PathType Container)) {
-        throw "Minecraft server directory does not exist: $($Paths.Server)"
-    }
-    if (-not (Test-Path -LiteralPath $Paths.Plugins -PathType Container)) {
-        throw "Minecraft plugins directory does not exist: $($Paths.Plugins)"
-    }
+          $oldDirectories = @(
+            '    foreach ($path in @($Paths.Plugins, $Paths.Disabled, $Paths.Root, $Paths.Downloads, $Paths.Backups)) {'
+            '        New-Item -ItemType Directory -Path $path -Force | Out-Null'
+            '    }'
+          ) -join "`n"
 
-    foreach ($path in @($Paths.Disabled, $Paths.Root, $Paths.Downloads, $Paths.Backups)) {
-        New-Item -ItemType Directory -Path $path -Force | Out-Null
-    }
-'@
+          $newDirectories = @(
+            '    if (-not (Test-Path -LiteralPath $Paths.Server -PathType Container)) {'
+            '        throw "Minecraft server directory does not exist: $($Paths.Server)"'
+            '    }'
+            '    if (-not (Test-Path -LiteralPath $Paths.Plugins -PathType Container)) {'
+            '        throw "Minecraft plugins directory does not exist: $($Paths.Plugins)"'
+            '    }'
+            ''
+            '    foreach ($path in @($Paths.Disabled, $Paths.Root, $Paths.Downloads, $Paths.Backups)) {'
+            '        New-Item -ItemType Directory -Path $path -Force | Out-Null'
+            '    }'
+          ) -join "`n"
+
           if (-not $content.Contains($oldDirectories)) {
             throw "Expected Ensure-ManagerDirectories implementation was not found."
           }
-          $content = $content.Replace($oldDirectories, $newDirectories.TrimEnd())
+          $content = $content.Replace($oldDirectories, $newDirectories)
 
           Set-Content -Path $path -Value $content -Encoding utf8
 
