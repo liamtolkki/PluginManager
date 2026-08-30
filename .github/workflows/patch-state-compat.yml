@@ -16,7 +16,7 @@ jobs:
       - name: Checkout PluginManager
         uses: actions/checkout@v6
 
-      - name: Patch state parser
+      - name: Patch PowerShell 5.1 compatibility
         shell: pwsh
         run: |
           $path = "PluginManager.psm1"
@@ -84,15 +84,33 @@ jobs:
           )
           Set-Content -Path $path -Value $content -Encoding utf8
 
-      - name: Validate Windows PowerShell 5.1 state parsing
+          $orchestrationPath = "PluginManager.Orchestration.psm1"
+          $orchestration = Get-Content -Path $orchestrationPath -Raw
+          $orchestration = $orchestration.Replace(
+            '[Parameter(Mandatory)][System.Collections.Generic.List[string]]$Stack',
+            '[Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Stack'
+          )
+          $orchestration = $orchestration.Replace(
+            '[Parameter(Mandatory)][System.Collections.Generic.List[string]]$Result',
+            '[Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Result'
+          )
+          $orchestration = $orchestration.Replace(
+            '[Parameter(Mandatory)][object[]]$Inventory',
+            '[Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Inventory'
+          )
+          Set-Content -Path $orchestrationPath -Value $orchestration -Encoding utf8
+
+      - name: Validate Windows PowerShell 5.1 behavior
         shell: powershell
         run: |
+          Import-Module .\PluginManager.Orchestration.psm1 -Force
           Import-Module .\PluginManager.psm1 -Force
-          $path = Join-Path $env:RUNNER_TEMP 'state.json'
-          '{"schemaVersion":1,"plugins":{"sanctuary":{"version":"0.1.0-alpha.1","enabled":true}}}' | Set-Content -Path $path -Encoding UTF8
+
+          $statePath = Join-Path $env:RUNNER_TEMP 'state.json'
+          '{"schemaVersion":1,"plugins":{"sanctuary":{"version":"0.1.0-alpha.1","enabled":true}}}' | Set-Content -Path $statePath -Encoding UTF8
           & (Get-Module PluginManager) {
-            param($StatePath)
-            $state = Get-ManagerState -Path $StatePath
+            param($Path)
+            $state = Get-ManagerState -Path $Path
             if (-not $state.plugins.ContainsKey('sanctuary')) {
               throw 'Expected Sanctuary state record.'
             }
@@ -100,19 +118,23 @@ jobs:
               throw 'Unexpected Sanctuary state version.'
             }
 
-            $missing = Join-Path (Split-Path -Parent $StatePath) 'missing.json'
-            $empty = Get-ManagerState -Path $missing
-            if (-not $empty.plugins.ContainsKey('anything')) {
-              $empty.plugins['anything'] = @{ version = 'test' }
-            }
-          } $path
+            $empty = Get-ManagerState -Path (Join-Path (Split-Path -Parent $Path) 'missing.json')
+            $empty.plugins['anything'] = @{ version = 'test' }
+          } $statePath
+
+          $catalog = Get-PluginCatalog -CatalogPath .\plugins.json
+          Assert-CatalogDependencyGraph -Catalog $catalog
+          $order = @(Get-DependencyOrder -Catalog $catalog)
+          if ($order -notcontains 'sanctuary') {
+            throw 'Expected Sanctuary in dependency order.'
+          }
 
       - name: Commit patch
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add PluginManager.psm1
-          git commit -m "Fix Windows PowerShell state parsing"
+          git add PluginManager.psm1 PluginManager.Orchestration.psm1
+          git commit -m "Fix Windows PowerShell collection compatibility"
           git pull --rebase origin main
           git push origin main
