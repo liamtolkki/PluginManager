@@ -12,7 +12,8 @@
         "^Sanctuary\\.jar$",
         "^sanctuary[-.].*\\.jar$"
       ],
-      "defaultChannel": "Prerelease"
+      "defaultChannel": "Prerelease",
+      "dependsOn": []
     }
   ]
 }
