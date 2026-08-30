@@ -1,30 +1,30 @@
 BeforeAll {
     $repoRoot = Split-Path -Parent $PSScriptRoot
     Import-Module (Join-Path $repoRoot "PluginManager.Orchestration.psm1") -Force
-}
 
-function New-TestCatalog {
-    param([object[]]$Plugins)
-    return [pscustomobject]@{
-        schemaVersion = 1
-        plugins = $Plugins
+    function New-TestCatalog {
+        param([object[]]$Plugins)
+        return [pscustomobject]@{
+            schemaVersion = 1
+            plugins = $Plugins
+        }
     }
-}
 
-function New-TestCatalogEntry {
-    param(
-        [Parameter(Mandatory)][string]$Id,
-        [string[]]$DependsOn = @()
-    )
+    function New-TestCatalogEntry {
+        param(
+            [Parameter(Mandatory)][string]$Id,
+            [string[]]$DependsOn = @()
+        )
 
-    return [pscustomobject]@{
-        id = $Id
-        pluginName = $Id
-        repository = "example/$Id"
-        assetPattern = "^$Id\\.jar$"
-        installedFile = "$Id.jar"
-        defaultChannel = "Stable"
-        dependsOn = $DependsOn
+        return [pscustomobject]@{
+            id = $Id
+            pluginName = $Id
+            repository = "example/$Id"
+            assetPattern = "^$Id\\.jar$"
+            installedFile = "$Id.jar"
+            defaultChannel = "Stable"
+            dependsOn = $DependsOn
+        }
     }
 }
 
