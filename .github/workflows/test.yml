@@ -39,6 +39,16 @@ jobs:
             }
           }
 
+      - name: Validate Windows PowerShell 5.1 release selection
+        shell: powershell
+        run: |
+          Import-Module .\PluginManager.psm1 -Force
+          $release = Get-GitHubRelease -Repository "liamtolkki/ExtendedItems" -Channel Prerelease
+          if (-not $release.prerelease) {
+            throw "Expected an ExtendedItems prerelease."
+          }
+          Write-Host "Selected $($release.tag_name)"
+
       - name: Install Pester
         shell: pwsh
         run: |
