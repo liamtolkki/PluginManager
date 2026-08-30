@@ -38,13 +38,45 @@ function Get-OptionalValue {
     return $property.Value
 }
 
+function ConvertTo-PluginManagerHashtable {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $result = @{}
+        foreach ($key in $Value.Keys) {
+            $result[[string]$key] = ConvertTo-PluginManagerHashtable $Value[$key]
+        }
+        return $result
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $result = @{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $result[$property.Name] = ConvertTo-PluginManagerHashtable $property.Value
+        }
+        return $result
+    }
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+        $items = @()
+        foreach ($item in $Value) {
+            $items += ,(ConvertTo-PluginManagerHashtable $item)
+        }
+        return $items
+    }
+    return $Value
+}
+
 function Read-JsonHashtable {
     param([Parameter(Mandatory)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) {
         return $null
     }
-    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+
+    $parsed = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    return ConvertTo-PluginManagerHashtable $parsed
 }
 
 function Write-JsonAtomic {
@@ -487,13 +519,13 @@ function Get-ManagerState {
 
     $state = Read-JsonHashtable -Path $Path
     if ($null -eq $state) {
-        return [ordered]@{ schemaVersion = 1; plugins = [ordered]@{} }
+        return @{ schemaVersion = 1; plugins = @{} }
     }
     if ($state.schemaVersion -ne 1) {
         throw "Unsupported PluginManager state schema version: $($state.schemaVersion)"
     }
     if (-not $state.ContainsKey("plugins")) {
-        $state.plugins = [ordered]@{}
+        $state.plugins = @{}
     }
     return $state
 }
@@ -1115,4 +1147,5 @@ Export-ModuleMember -Function @(
     "Resolve-ReleaseAsset",
     "Get-ExpectedSha256"
 )
+
 
