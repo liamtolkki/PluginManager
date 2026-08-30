@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "plugins": [
+    {
+      "id": "sanctuary",
+      "pluginName": "Sanctuary",
+      "repository": "liamtolkki/Sanctuary",
+      "assetPattern": "^Sanctuary\\.jar$",
+      "checksumAssetPattern": "^Sanctuary\\.jar\\.sha256$",
+      "installedFile": "Sanctuary.jar",
+      "installedFilePatterns": [
+        "^Sanctuary\\.jar$",
+        "^sanctuary[-.].*\\.jar$"
+      ],
+      "defaultChannel": "Prerelease"
+    },
+    {
+      "id": "extendeditems",
+      "pluginName": "ExtendedItems",
+      "repository": "liamtolkki/ExtendedItems",
+      "assetPattern": "^extendeditems-.*\\.jar$",
+      "installedFile": "ExtendedItems.jar",
+      "installedFilePatterns": [
+        "^ExtendedItems\\.jar$",
+        "^extendeditems[-.].*\\.jar$"
+      ],
+      "defaultChannel": "Prerelease"
+    },
+    {
+      "id": "extendedui",
+      "pluginName": "ExtendedUI",
+      "repository": "liamtolkki/ExtendedUI",
+      "assetPattern": "^extendedui-.*\\.jar$",
+      "installedFile": "ExtendedUI.jar",
+      "installedFilePatterns": [
+        "^ExtendedUI\\.jar$",
+        "^extendedui[-.].*\\.jar$"
+      ],
+      "defaultChannel": "Stable"
+    }
+  ]
+}
