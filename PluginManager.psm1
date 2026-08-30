@@ -282,6 +282,30 @@ function Resolve-InstalledPlugin {
     return $matches[0]
 }
 
+function Select-GitHubRelease {
+    param(
+        [Parameter(Mandatory)]$Releases,
+        [ValidateSet("Stable", "Prerelease")][string]$Channel = "Stable"
+    )
+
+    foreach ($release in $Releases) {
+        $isDraft = [bool](Get-OptionalValue -Object $release -Name "draft" -Default $false)
+        if ($isDraft) {
+            continue
+        }
+
+        $isPrerelease = [bool](Get-OptionalValue -Object $release -Name "prerelease" -Default $false)
+        if ($Channel -eq "Prerelease" -and $isPrerelease) {
+            return $release
+        }
+        if ($Channel -eq "Stable" -and -not $isPrerelease) {
+            return $release
+        }
+    }
+
+    return $null
+}
+
 function Get-GitHubRelease {
     [CmdletBinding()]
     param(
@@ -296,13 +320,8 @@ function Get-GitHubRelease {
         return Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/tags/$encoded" -Headers $script:GitHubHeaders -Method Get
     }
 
-    $releases = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases?per_page=100" -Headers $script:GitHubHeaders -Method Get)
-    $selected = if ($Channel -eq "Prerelease") {
-        $releases | Where-Object { -not $_.draft -and $_.prerelease } | Select-Object -First 1
-    }
-    else {
-        $releases | Where-Object { -not $_.draft -and -not $_.prerelease } | Select-Object -First 1
-    }
+    $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases?per_page=100" -Headers $script:GitHubHeaders -Method Get
+    $selected = Select-GitHubRelease -Releases $response -Channel $Channel
 
     if (-not $selected) {
         throw "No $Channel release is available for $Repository."
@@ -1096,3 +1115,4 @@ Export-ModuleMember -Function @(
     "Resolve-ReleaseAsset",
     "Get-ExpectedSha256"
 )
+
