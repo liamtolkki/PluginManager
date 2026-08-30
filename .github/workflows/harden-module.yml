@@ -1,0 +1,84 @@
+name: Harden module
+
+on:
+  push:
+    paths:
+      - .github/workflows/harden-module.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout PluginManager
+        uses: actions/checkout@v6
+
+      - name: Apply migration hardening
+        shell: pwsh
+        run: |
+          $path = "PluginManager.psm1"
+          $content = Get-Content -Path $path -Raw
+
+          $replacements = [ordered]@{
+            '-ReleaseTag $stateRecord.releaseTag' = '-ReleaseTag $(if ($stateRecord) { $stateRecord.releaseTag } else { $null })'
+            '-ReleaseTag $record.releaseTag' = '-ReleaseTag $(if ($record) { $record.releaseTag } else { $null })'
+            '-ReleaseTag $currentRecord.releaseTag' = '-ReleaseTag $(if ($currentRecord) { $currentRecord.releaseTag } else { $null })'
+            '-Repository $entry.repository' = '-Repository $(if ($entry) { $entry.repository } else { $null })'
+            '-Repository $catalogEntry.repository' = '-Repository $(if ($catalogEntry) { $catalogEntry.repository } else { $null })'
+            'ManagedId = if ($entry) { $entry.id } else { $installed.ManagedId }' = 'ManagedId = if ($entry) { $entry.id } elseif ($installed) { $installed.ManagedId } else { $null }'
+            '$State.plugins.Remove($key)' = '[void]$State.plugins.Remove($key)'
+          }
+
+          foreach ($replacement in $replacements.GetEnumerator()) {
+            if (-not $content.Contains($replacement.Key)) {
+              throw "Expected source text was not found: $($replacement.Key)"
+            }
+            $content = $content.Replace($replacement.Key, $replacement.Value)
+          }
+
+          $oldDirectories = '    foreach ($path in @($Paths.Plugins, $Paths.Disabled, $Paths.Root, $Paths.Downloads, $Paths.Backups)) {' + "`n" + '        New-Item -ItemType Directory -Path $path -Force | Out-Null' + "`n" + '    }'
+          $newDirectories = @'
+    if (-not (Test-Path -LiteralPath $Paths.Server -PathType Container)) {
+        throw "Minecraft server directory does not exist: $($Paths.Server)"
+    }
+    if (-not (Test-Path -LiteralPath $Paths.Plugins -PathType Container)) {
+        throw "Minecraft plugins directory does not exist: $($Paths.Plugins)"
+    }
+
+    foreach ($path in @($Paths.Disabled, $Paths.Root, $Paths.Downloads, $Paths.Backups)) {
+        New-Item -ItemType Directory -Path $path -Force | Out-Null
+    }
+'@
+          if (-not $content.Contains($oldDirectories)) {
+            throw "Expected Ensure-ManagerDirectories implementation was not found."
+          }
+          $content = $content.Replace($oldDirectories, $newDirectories.TrimEnd())
+
+          Set-Content -Path $path -Value $content -Encoding utf8
+
+      - name: Validate hardened module
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "PluginManager.psm1"),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw "Hardened module has PowerShell syntax errors."
+          }
+
+      - name: Commit hardened module
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PluginManager.psm1
+          git commit -m "Harden unmanaged plugin migration paths"
+          git push origin main
