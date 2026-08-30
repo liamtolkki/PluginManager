@@ -89,7 +89,7 @@ function Test-DependencyNode {
         [Parameter(Mandatory)]$Catalog,
         [Parameter(Mandatory)][string]$Id,
         [Parameter(Mandatory)][hashtable]$State,
-        [Parameter(Mandatory)][System.Collections.Generic.List[string]]$Stack
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Stack
     )
 
     $currentState = if ($State.ContainsKey($Id)) { [int]$State[$Id] } else { 0 }
@@ -153,7 +153,7 @@ function Add-DependencyNodeToOrder {
         [Parameter(Mandatory)]$Catalog,
         [Parameter(Mandatory)][string]$Id,
         [Parameter(Mandatory)][hashtable]$Visited,
-        [Parameter(Mandatory)][System.Collections.Generic.List[string]]$Result
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Result
     )
 
     $normalized = $Id.ToLowerInvariant()
@@ -198,7 +198,7 @@ function Get-DependencyOrder {
 
 function Get-InstalledItemByManagedId {
     param(
-        [Parameter(Mandatory)][object[]]$Inventory,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Inventory,
         [Parameter(Mandatory)][string]$ManagedId
     )
 
@@ -218,7 +218,7 @@ function Resolve-OrchestrationInstalledPlugin {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Reference,
-        [Parameter(Mandatory)][object[]]$Inventory
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Inventory
     )
 
     $normalized = $Reference.ToLowerInvariant()
@@ -243,7 +243,7 @@ function Get-InstalledDependents {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Catalog,
-        [Parameter(Mandatory)][object[]]$Inventory,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Inventory,
         [Parameter(Mandatory)][string]$ManagedId,
         [switch]$EnabledOnly
     )
@@ -271,7 +271,7 @@ function Assert-PluginMutationAllowed {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Catalog,
-        [Parameter(Mandatory)][object[]]$Inventory,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Inventory,
         [Parameter(Mandatory)]$Item,
         [ValidateSet("remove", "disable")][string]$Operation
     )
@@ -941,3 +941,4 @@ Export-ModuleMember -Function @(
     "Invoke-DependencyAwareEnable",
     "Invoke-DependencyGuardedMutation"
 )
+
