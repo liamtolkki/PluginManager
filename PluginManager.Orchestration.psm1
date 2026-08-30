@@ -280,12 +280,12 @@ function Assert-PluginMutationAllowed {
         return
     }
 
-    $dependents = if ($Operation -eq "disable") {
-        @(Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId -EnabledOnly)
+    $dependents = @(if ($Operation -eq "disable") {
+        Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId -EnabledOnly
     }
     else {
-        @(Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId)
-    }
+        Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId
+    })
 
     if ($dependents.Count -gt 0) {
         $names = ($dependents | ForEach-Object { $_.Name } | Sort-Object -Unique) -join ", "
@@ -941,4 +941,5 @@ Export-ModuleMember -Function @(
     "Invoke-DependencyAwareEnable",
     "Invoke-DependencyGuardedMutation"
 )
+
 
