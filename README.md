@@ -150,7 +150,9 @@ Plugin data directories are not deleted by install, update, disable, enable, rem
 
 ## Managed catalog
 
-`plugins.json` describes sources that PluginManager can install or update automatically.
+`plugins.json` contains independently deployable Paper plugins that PluginManager can install or update automatically.
+
+Do not add Java libraries or dependencies that are bundled inside another plugin's shaded JAR. For example, ExtendedItems and ExtendedUI are bundled into Sanctuary and are not separate server plugins.
 
 A catalog entry defines:
 
@@ -163,7 +165,7 @@ A catalog entry defines:
 - legacy filename patterns
 - default release channel
 
-The initial catalog contains the server projects that already publish usable GitHub Release JARs. More entries can be added without changing the deployment engine.
+The initial catalog contains Sanctuary. Add new entries as independently deployable plugins begin publishing usable GitHub Release JARs.
 
 ## Existing plugins
 
