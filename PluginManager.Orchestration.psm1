@@ -63,10 +63,9 @@ function Get-CatalogDependencyIds {
 
     $dependencies = @()
     foreach ($dependency in @(Get-OrchestrationOptionalValue -Object $Entry -Name "dependsOn" -Default @())) {
-        if (-not $dependency) {
-            continue
+        if ($dependency) {
+            $dependencies += ([string]$dependency).ToLowerInvariant()
         }
-        $dependencies += ([string]$dependency).ToLowerInvariant()
     }
     return $dependencies
 }
@@ -85,6 +84,33 @@ function Get-CatalogEntryById {
     return $null
 }
 
+function Test-DependencyNode {
+    param(
+        [Parameter(Mandatory)]$Catalog,
+        [Parameter(Mandatory)][string]$Id,
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][System.Collections.Generic.List[string]]$Stack
+    )
+
+    $currentState = if ($State.ContainsKey($Id)) { [int]$State[$Id] } else { 0 }
+    if ($currentState -eq 2) {
+        return
+    }
+    if ($currentState -eq 1) {
+        $cycle = @($Stack) + $Id
+        throw "Plugin dependency cycle detected: $($cycle -join ' -> ')"
+    }
+
+    $State[$Id] = 1
+    $Stack.Add($Id)
+    $entry = Get-CatalogEntryById -Catalog $Catalog -Id $Id
+    foreach ($dependency in @(Get-CatalogDependencyIds -Entry $entry)) {
+        Test-DependencyNode -Catalog $Catalog -Id $dependency -State $State -Stack $Stack
+    }
+    $Stack.RemoveAt($Stack.Count - 1)
+    $State[$Id] = 2
+}
+
 function Assert-CatalogDependencyGraph {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Catalog)
@@ -92,7 +118,7 @@ function Assert-CatalogDependencyGraph {
     $known = @{}
     foreach ($entry in @($Catalog.plugins)) {
         $id = ([string]$entry.id).ToLowerInvariant()
-        $known[$id] = $entry
+        $known[$id] = $true
 
         $seen = @{}
         foreach ($dependency in @(Get-CatalogDependencyIds -Entry $entry)) {
@@ -117,31 +143,33 @@ function Assert-CatalogDependencyGraph {
 
     $state = @{}
     $stack = New-Object System.Collections.Generic.List[string]
-
-    function Visit-DependencyNode {
-        param([Parameter(Mandatory)][string]$Id)
-
-        $currentState = if ($state.ContainsKey($Id)) { [int]$state[$Id] } else { 0 }
-        if ($currentState -eq 2) {
-            return
-        }
-        if ($currentState -eq 1) {
-            $cycle = @($stack) + $Id
-            throw "Plugin dependency cycle detected: $($cycle -join ' -> ')"
-        }
-
-        $state[$Id] = 1
-        $stack.Add($Id)
-        foreach ($dependency in @(Get-CatalogDependencyIds -Entry $known[$Id])) {
-            Visit-DependencyNode -Id $dependency
-        }
-        $stack.RemoveAt($stack.Count - 1)
-        $state[$Id] = 2
-    }
-
     foreach ($id in @($known.Keys | Sort-Object)) {
-        Visit-DependencyNode -Id $id
+        Test-DependencyNode -Catalog $Catalog -Id $id -State $state -Stack $stack
     }
+}
+
+function Add-DependencyNodeToOrder {
+    param(
+        [Parameter(Mandatory)]$Catalog,
+        [Parameter(Mandatory)][string]$Id,
+        [Parameter(Mandatory)][hashtable]$Visited,
+        [Parameter(Mandatory)][System.Collections.Generic.List[string]]$Result
+    )
+
+    $normalized = $Id.ToLowerInvariant()
+    if ($Visited.ContainsKey($normalized)) {
+        return
+    }
+    $Visited[$normalized] = $true
+
+    $entry = Get-CatalogEntryById -Catalog $Catalog -Id $normalized
+    if (-not $entry) {
+        throw "Unknown managed plugin '$Id'."
+    }
+    foreach ($dependency in @(Get-CatalogDependencyIds -Entry $entry)) {
+        Add-DependencyNodeToOrder -Catalog $Catalog -Id $dependency -Visited $Visited -Result $Result
+    }
+    $Result.Add($normalized)
 }
 
 function Get-DependencyOrder {
@@ -152,46 +180,20 @@ function Get-DependencyOrder {
     )
 
     Assert-CatalogDependencyGraph -Catalog $Catalog
-
     $visited = @{}
-    $order = @()
+    $result = New-Object System.Collections.Generic.List[string]
 
-    function Add-DependencyNode {
-        param([Parameter(Mandatory)][string]$Id)
-
-        $normalized = $Id.ToLowerInvariant()
-        if ($visited.ContainsKey($normalized)) {
-            return
+    if ($RootId) {
+        Add-DependencyNodeToOrder -Catalog $Catalog -Id $RootId -Visited $visited -Result $result
+    }
+    else {
+        foreach ($entry in @($Catalog.plugins | Sort-Object id)) {
+            $entryId = [string]$entry.id
+            Add-DependencyNodeToOrder -Catalog $Catalog -Id $entryId -Visited $visited -Result $result
         }
-        $visited[$normalized] = $true
-
-        $entry = Get-CatalogEntryById -Catalog $Catalog -Id $normalized
-        if (-not $entry) {
-            throw "Unknown managed plugin '$Id'."
-        }
-        foreach ($dependency in @(Get-CatalogDependencyIds -Entry $entry)) {
-            Add-DependencyNode -Id $dependency
-        }
-        $script:__pluginManagerDependencyOrder += $normalized
     }
 
-    $script:__pluginManagerDependencyOrder = @()
-    try {
-        if ($RootId) {
-            Add-DependencyNode -Id $RootId
-        }
-        else {
-            foreach ($entry in @($Catalog.plugins | Sort-Object id)) {
-                Add-DependencyNode -Id ([string]$entry.id)
-            }
-        }
-        $order = @($script:__pluginManagerDependencyOrder)
-    }
-    finally {
-        Remove-Variable -Name __pluginManagerDependencyOrder -Scope Script -ErrorAction SilentlyContinue
-    }
-
-    return $order
+    return @($result)
 }
 
 function Get-InstalledItemByManagedId {
@@ -205,6 +207,31 @@ function Get-InstalledItemByManagedId {
     })
     if ($matches.Count -gt 1) {
         throw "Multiple installed JARs match managed plugin '$ManagedId'."
+    }
+    if ($matches.Count -eq 1) {
+        return $matches[0]
+    }
+    return $null
+}
+
+function Resolve-OrchestrationInstalledPlugin {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Reference,
+        [Parameter(Mandatory)][object[]]$Inventory
+    )
+
+    $normalized = $Reference.ToLowerInvariant()
+    $matches = @($Inventory | Where-Object {
+        ($_.ManagedId -and ([string]$_.ManagedId).Equals($Reference, [System.StringComparison]::OrdinalIgnoreCase)) -or
+        ([string]$_.Name).Equals($Reference, [System.StringComparison]::OrdinalIgnoreCase) -or
+        ([string]$_.FileName).Equals($Reference, [System.StringComparison]::OrdinalIgnoreCase) -or
+        ([System.IO.Path]::GetFileNameWithoutExtension([string]$_.FileName)).ToLowerInvariant() -eq $normalized
+    })
+
+    if ($matches.Count -gt 1) {
+        $paths = ($matches | ForEach-Object { $_.Path }) -join [Environment]::NewLine
+        throw "Plugin reference '$Reference' is ambiguous. Matching JARs:`n$paths"
     }
     if ($matches.Count -eq 1) {
         return $matches[0]
@@ -260,12 +287,10 @@ function Assert-PluginMutationAllowed {
         @(Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId)
     }
 
-    if ($dependents.Count -eq 0) {
-        return
+    if ($dependents.Count -gt 0) {
+        $names = ($dependents | ForEach-Object { $_.Name } | Sort-Object -Unique) -join ", "
+        throw "Cannot $Operation $($Item.Name) because installed plugin(s) depend on it: $names"
     }
-
-    $names = ($dependents | ForEach-Object { $_.Name } | Sort-Object -Unique) -join ", "
-    throw "Cannot $Operation $($Item.Name) because installed plugin(s) depend on it: $names"
 }
 
 function Ensure-PluginDependencies {
@@ -291,26 +316,30 @@ function Ensure-PluginDependencies {
         $installed = Get-InstalledItemByManagedId -Inventory $inventory -ManagedId $dependencyId
 
         if (-not $installed) {
-            $results += Invoke-PluginManager \
-                -Command install \
-                -Plugin $dependencyId \
-                -ServerPath $ServerPath \
-                -ServiceName $ServiceName \
-                -CatalogPath $CatalogPath \
-                -BackupCount $BackupCount \
-                -DryRun:$DryRun
+            $parameters = @{
+                Command = "install"
+                Plugin = $dependencyId
+                ServerPath = $ServerPath
+                ServiceName = $ServiceName
+                CatalogPath = $CatalogPath
+                BackupCount = $BackupCount
+                DryRun = $DryRun
+            }
+            $results += Invoke-PluginManager @parameters
             continue
         }
 
         if (-not $installed.Enabled) {
-            $results += Invoke-PluginManager \
-                -Command enable \
-                -Plugin $dependencyId \
-                -ServerPath $ServerPath \
-                -ServiceName $ServiceName \
-                -CatalogPath $CatalogPath \
-                -BackupCount $BackupCount \
-                -DryRun:$DryRun
+            $parameters = @{
+                Command = "enable"
+                Plugin = $dependencyId
+                ServerPath = $ServerPath
+                ServiceName = $ServiceName
+                CatalogPath = $CatalogPath
+                BackupCount = $BackupCount
+                DryRun = $DryRun
+            }
+            $results += Invoke-PluginManager @parameters
         }
     }
 
@@ -598,12 +627,13 @@ function Stage-ManagedUpdate {
     $downloadedJar = Join-Path $directory ([string]$asset.name)
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $downloadedJar -UseBasicParsing
 
-    $checksumPattern = Get-OrchestrationOptionalValue -Object $entry -Name "checksumAssetPattern"
-    $expectedHash = Get-ExpectedSha256 \
-        -Release $release \
-        -JarAsset $asset \
-        -ChecksumAssetPattern $checksumPattern \
-        -DownloadDirectory $directory
+    $checksumParameters = @{
+        Release = $release
+        JarAsset = $asset
+        ChecksumAssetPattern = Get-OrchestrationOptionalValue -Object $entry -Name "checksumAssetPattern"
+        DownloadDirectory = $directory
+    }
+    $expectedHash = Get-ExpectedSha256 @checksumParameters
     $actualHash = (Get-FileHash -LiteralPath $downloadedJar -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualHash -ne $expectedHash) {
         throw "SHA-256 verification failed for $($PlanItem.Name). Expected $expectedHash, got $actualHash."
@@ -614,12 +644,6 @@ function Stage-ManagedUpdate {
         throw "Downloaded JAR declares plugin '$($metadata.Name)', expected '$($entry.pluginName)'."
     }
 
-    $targetDirectory = if ($PlanItem.Enabled) {
-        Join-Path $PlanItem.Installed.Path ".."
-    }
-    else {
-        Join-Path $PlanItem.Installed.Path ".."
-    }
     $targetDirectory = [System.IO.Path]::GetDirectoryName([string]$PlanItem.Installed.Path)
     $targetPath = Join-Path $targetDirectory ([string]$entry.installedFile)
 
@@ -699,12 +723,13 @@ function Invoke-UpdateAll {
         $backups = @{}
         foreach ($item in $staged) {
             $record = Get-OrchestrationStateRecord -State $state -ManagedId $item.Id
-            $previousRelease = Get-OrchestrationOptionalValue -Object $record -Name "releaseTag"
-            $backups[$item.Id] = New-OrchestrationBackup \
-                -Paths $paths \
-                -Item $item.Installed \
-                -ManagedId $item.Id \
-                -ReleaseTag $previousRelease
+            $backupParameters = @{
+                Paths = $paths
+                Item = $item.Installed
+                ManagedId = $item.Id
+                ReleaseTag = Get-OrchestrationOptionalValue -Object $record -Name "releaseTag"
+            }
+            $backups[$item.Id] = New-OrchestrationBackup @backupParameters
         }
 
         Invoke-OrchestrationServiceTransaction -ServiceName $ServiceName -Mutation {
@@ -715,7 +740,8 @@ function Invoke-UpdateAll {
                 Copy-Item -LiteralPath $item.DownloadedJar -Destination $item.TargetPath -Force
             }
         } -Rollback {
-            foreach ($item in @($staged | Select-Object -Reverse)) {
+            for ($index = $staged.Count - 1; $index -ge 0; $index--) {
+                $item = $staged[$index]
                 if (Test-Path -LiteralPath $item.TargetPath) {
                     Remove-Item -LiteralPath $item.TargetPath -Force
                 }
@@ -790,14 +816,16 @@ function Invoke-DependencyAwareInstall {
         }
     }
 
-    $results = @(Ensure-PluginDependencies \
-        -Catalog $Catalog \
-        -PluginId ([string]$entry.id) \
-        -ServerPath $ServerPath \
-        -ServiceName $ServiceName \
-        -CatalogPath $CatalogPath \
-        -BackupCount $BackupCount \
-        -DryRun:$DryRun)
+    $dependencyParameters = @{
+        Catalog = $Catalog
+        PluginId = [string]$entry.id
+        ServerPath = $ServerPath
+        ServiceName = $ServiceName
+        CatalogPath = $CatalogPath
+        BackupCount = $BackupCount
+        DryRun = $DryRun
+    }
+    $results = @(Ensure-PluginDependencies @dependencyParameters)
 
     $parameters = @{
         Command = if ($RequireInstalled) { "update" } else { "install" }
@@ -819,14 +847,97 @@ function Invoke-DependencyAwareInstall {
     return $results
 }
 
+function Invoke-DependencyAwareEnable {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Catalog,
+        [Parameter(Mandatory)][string]$Plugin,
+        [Parameter(Mandatory)][string]$ServerPath,
+        [Parameter(Mandatory)][string]$ServiceName,
+        [Parameter(Mandatory)][string]$CatalogPath,
+        [ValidateRange(1, 100)][int]$BackupCount,
+        [switch]$DryRun
+    )
+
+    $inventory = @(Get-InstalledPluginInventory -ServerPath $ServerPath -Catalog $Catalog)
+    $item = Resolve-OrchestrationInstalledPlugin -Reference $Plugin -Inventory $inventory
+    if (-not $item) {
+        throw "Plugin '$Plugin' is not installed."
+    }
+
+    $results = @()
+    if ($item.ManagedId) {
+        $dependencyParameters = @{
+            Catalog = $Catalog
+            PluginId = [string]$item.ManagedId
+            ServerPath = $ServerPath
+            ServiceName = $ServiceName
+            CatalogPath = $CatalogPath
+            BackupCount = $BackupCount
+            DryRun = $DryRun
+        }
+        $results += Ensure-PluginDependencies @dependencyParameters
+    }
+
+    $parameters = @{
+        Command = "enable"
+        Plugin = $Plugin
+        ServerPath = $ServerPath
+        ServiceName = $ServiceName
+        CatalogPath = $CatalogPath
+        BackupCount = $BackupCount
+        DryRun = $DryRun
+    }
+    $results += Invoke-PluginManager @parameters
+    return $results
+}
+
+function Invoke-DependencyGuardedMutation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Catalog,
+        [ValidateSet("remove", "disable")][string]$Command,
+        [Parameter(Mandatory)][string]$Plugin,
+        [Parameter(Mandatory)][string]$ServerPath,
+        [Parameter(Mandatory)][string]$ServiceName,
+        [Parameter(Mandatory)][string]$CatalogPath,
+        [ValidateRange(1, 100)][int]$BackupCount,
+        [switch]$DryRun,
+        [switch]$Force
+    )
+
+    $inventory = @(Get-InstalledPluginInventory -ServerPath $ServerPath -Catalog $Catalog)
+    $item = Resolve-OrchestrationInstalledPlugin -Reference $Plugin -Inventory $inventory
+    if (-not $item) {
+        throw "Plugin '$Plugin' is not installed."
+    }
+
+    Assert-PluginMutationAllowed -Catalog $Catalog -Inventory $inventory -Item $item -Operation $Command
+
+    $parameters = @{
+        Command = $Command
+        Plugin = $Plugin
+        ServerPath = $ServerPath
+        ServiceName = $ServiceName
+        CatalogPath = $CatalogPath
+        BackupCount = $BackupCount
+        DryRun = $DryRun
+        Force = $Force
+    }
+    return Invoke-PluginManager @parameters
+}
+
 Export-ModuleMember -Function @(
     "Assert-CatalogDependencyGraph",
     "Get-CatalogDependencyIds",
     "Get-DependencyOrder",
     "Get-InstalledDependents",
     "Assert-PluginMutationAllowed",
+    "Resolve-OrchestrationInstalledPlugin",
     "Ensure-PluginDependencies",
     "Get-ManagedUpdatePlan",
     "Invoke-UpdateAll",
-    "Invoke-DependencyAwareInstall"
+    "Invoke-DependencyAwareInstall",
+    "Invoke-DependencyAwareEnable",
+    "Invoke-DependencyGuardedMutation"
 )
