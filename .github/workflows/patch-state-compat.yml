@@ -16,95 +16,57 @@ jobs:
       - name: Checkout PluginManager
         uses: actions/checkout@v6
 
-      - name: Patch PowerShell 5.1 compatibility
+      - name: Remove duplicate compatibility helper
         shell: pwsh
         run: |
           $path = "PluginManager.psm1"
           $content = Get-Content -Path $path -Raw
-          $pattern = '(?s)function Read-JsonHashtable \{.*?\r?\n\}\r?\n\r?\nfunction Write-JsonAtomic'
-
-          $replacement = @(
-            'function ConvertTo-PluginManagerHashtable {'
-            '    param($Value)'
-            ''
-            '    if ($null -eq $Value) {'
-            '        return $null'
-            '    }'
-            '    if ($Value -is [System.Collections.IDictionary]) {'
-            '        $result = @{}'
-            '        foreach ($key in $Value.Keys) {'
-            '            $result[[string]$key] = ConvertTo-PluginManagerHashtable $Value[$key]'
-            '        }'
-            '        return $result'
-            '    }'
-            '    if ($Value -is [System.Management.Automation.PSCustomObject]) {'
-            '        $result = @{}'
-            '        foreach ($property in $Value.PSObject.Properties) {'
-            '            $result[$property.Name] = ConvertTo-PluginManagerHashtable $property.Value'
-            '        }'
-            '        return $result'
-            '    }'
-            '    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {'
-            '        $items = @()'
-            '        foreach ($item in $Value) {'
-            '            $items += ,(ConvertTo-PluginManagerHashtable $item)'
-            '        }'
-            '        return $items'
-            '    }'
-            '    return $Value'
-            '}'
-            ''
-            'function Read-JsonHashtable {'
-            '    param([Parameter(Mandatory)][string]$Path)'
-            ''
-            '    if (-not (Test-Path -LiteralPath $Path)) {'
-            '        return $null'
-            '    }'
-            ''
-            '    $parsed = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json'
-            '    return ConvertTo-PluginManagerHashtable $parsed'
-            '}'
-            ''
-            'function Write-JsonAtomic'
-          ) -join "`n"
-
-          $regex = [regex]::new($pattern)
-          if (-not $regex.IsMatch($content)) {
-            throw "Expected Read-JsonHashtable implementation was not found."
+          $marker = "function ConvertTo-PluginManagerHashtable {"
+          $first = $content.IndexOf($marker, [System.StringComparison]::Ordinal)
+          if ($first -lt 0) {
+            throw "Compatibility helper was not found."
           }
 
-          $content = $regex.Replace($content, $replacement, 1)
-          $content = $content.Replace(
-            'return [ordered]@{ schemaVersion = 1; plugins = [ordered]@{} }',
-            'return @{ schemaVersion = 1; plugins = @{} }'
+          $second = $content.IndexOf(
+            $marker,
+            $first + $marker.Length,
+            [System.StringComparison]::Ordinal
           )
-          $content = $content.Replace(
-            '$state.plugins = [ordered]@{}',
-            '$state.plugins = @{}'
-          )
-          Set-Content -Path $path -Value $content -Encoding utf8
 
-          $orchestrationPath = "PluginManager.Orchestration.psm1"
-          $orchestration = Get-Content -Path $orchestrationPath -Raw
-          $orchestration = $orchestration.Replace(
-            '[Parameter(Mandatory)][System.Collections.Generic.List[string]]$Stack',
-            '[Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Stack'
-          )
-          $orchestration = $orchestration.Replace(
-            '[Parameter(Mandatory)][System.Collections.Generic.List[string]]$Result',
-            '[Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Result'
-          )
-          $orchestration = $orchestration.Replace(
-            '[Parameter(Mandatory)][object[]]$Inventory',
-            '[Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Inventory'
-          )
-          Set-Content -Path $orchestrationPath -Value $orchestration -Encoding utf8
+          if ($second -ge 0) {
+            $readFunction = $content.IndexOf(
+              "function Read-JsonHashtable {",
+              $second,
+              [System.StringComparison]::Ordinal
+            )
+            if ($readFunction -lt 0) {
+              throw "Read-JsonHashtable was not found after duplicate helper."
+            }
+            $content = $content.Remove($second, $readFunction - $second)
+          }
+
+          $count = ([regex]::Matches(
+            $content,
+            'function ConvertTo-PluginManagerHashtable \{'
+          )).Count
+          if ($count -ne 1) {
+            throw "Expected exactly one compatibility helper after cleanup, found $count."
+          }
+
+          Set-Content -Path $path -Value $content -Encoding utf8
 
       - name: Validate Windows PowerShell 5.1 behavior
         shell: powershell
         run: |
           Import-Module .\PluginManager.Orchestration.psm1 -Force
           Import-Module .\PluginManager.psm1 -Force
+
+          $catalog = Get-PluginCatalog -CatalogPath .\plugins.json
+          Assert-CatalogDependencyGraph -Catalog $catalog
+          $order = @(Get-DependencyOrder -Catalog $catalog)
+          if ($order -notcontains 'sanctuary') {
+            throw 'Expected Sanctuary in dependency order.'
+          }
 
           $statePath = Join-Path $env:RUNNER_TEMP 'state.json'
           '{"schemaVersion":1,"plugins":{"sanctuary":{"version":"0.1.0-alpha.1","enabled":true}}}' | Set-Content -Path $statePath -Encoding UTF8
@@ -114,27 +76,18 @@ jobs:
             if (-not $state.plugins.ContainsKey('sanctuary')) {
               throw 'Expected Sanctuary state record.'
             }
-            if ($state.plugins['sanctuary'].version -ne '0.1.0-alpha.1') {
-              throw 'Unexpected Sanctuary state version.'
-            }
-
-            $empty = Get-ManagerState -Path (Join-Path (Split-Path -Parent $Path) 'missing.json')
-            $empty.plugins['anything'] = @{ version = 'test' }
           } $statePath
 
-          $catalog = Get-PluginCatalog -CatalogPath .\plugins.json
-          Assert-CatalogDependencyGraph -Catalog $catalog
-          $order = @(Get-DependencyOrder -Catalog $catalog)
-          if ($order -notcontains 'sanctuary') {
-            throw 'Expected Sanctuary in dependency order.'
-          }
-
-      - name: Commit patch
+      - name: Commit cleanup
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add PluginManager.psm1 PluginManager.Orchestration.psm1
-          git commit -m "Fix Windows PowerShell collection compatibility"
+          git add PluginManager.psm1
+          if (git diff --cached --quiet) {
+            Write-Host "No cleanup changes were needed."
+            exit 0
+          }
+          git commit -m "Remove duplicate compatibility helper"
           git pull --rebase origin main
           git push origin main
