@@ -11,8 +11,31 @@ $script:GitHubHeaders = @{
 
 function Normalize-PluginKey {
     param([Parameter(Mandatory)][string]$Value)
-
     return ($Value.ToLowerInvariant() -replace "[^a-z0-9._-]", "-")
+}
+
+function Get-OptionalValue {
+    param(
+        $Object,
+        [Parameter(Mandatory)][string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $Object) {
+        return $Default
+    }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name)) {
+            return $Object[$Name]
+        }
+        return $Default
+    }
+
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $Default
+    }
+    return $property.Value
 }
 
 function Read-JsonHashtable {
@@ -21,7 +44,6 @@ function Read-JsonHashtable {
     if (-not (Test-Path -LiteralPath $Path)) {
         return $null
     }
-
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
 }
 
@@ -37,8 +59,7 @@ function Write-JsonAtomic {
     }
 
     $temporary = "$Path.tmp"
-    $json = $Value | ConvertTo-Json -Depth 20
-    Set-Content -LiteralPath $temporary -Value $json -Encoding utf8
+    $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporary -Encoding utf8
     Move-Item -LiteralPath $temporary -Destination $Path -Force
 }
 
@@ -46,7 +67,7 @@ function Get-PluginCatalog {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$CatalogPath)
 
-    if (-not (Test-Path -LiteralPath $CatalogPath)) {
+    if (-not (Test-Path -LiteralPath $CatalogPath -PathType Leaf)) {
         throw "Plugin catalog does not exist: $CatalogPath"
     }
 
@@ -55,27 +76,31 @@ function Get-PluginCatalog {
         throw "Unsupported plugin catalog schema version: $($catalog.schemaVersion)"
     }
 
-    $seenIds = @{}
-    foreach ($plugin in @($catalog.plugins)) {
-        if (-not $plugin.id -or -not $plugin.pluginName -or -not $plugin.repository -or -not $plugin.assetPattern -or -not $plugin.installedFile) {
-            throw "Every catalog entry must define id, pluginName, repository, assetPattern, and installedFile."
+    $seen = @{}
+    foreach ($entry in @($catalog.plugins)) {
+        foreach ($required in @("id", "pluginName", "repository", "assetPattern", "installedFile")) {
+            if (-not (Get-OptionalValue -Object $entry -Name $required)) {
+                throw "Catalog entry is missing required field '$required'."
+            }
         }
 
-        $id = Normalize-PluginKey $plugin.id
-        if ($seenIds.ContainsKey($id)) {
+        $id = Normalize-PluginKey ([string]$entry.id)
+        if ($seen.ContainsKey($id)) {
             throw "Duplicate plugin catalog id: $id"
         }
-        $seenIds[$id] = $true
+        $seen[$id] = $true
 
-        if ($plugin.defaultChannel -and $plugin.defaultChannel -notin @("Stable", "Prerelease")) {
-            throw "Invalid default channel for $($plugin.id): $($plugin.defaultChannel)"
+        $channel = Get-OptionalValue -Object $entry -Name "defaultChannel" -Default "Stable"
+        if ($channel -notin @("Stable", "Prerelease")) {
+            throw "Invalid default channel for $($entry.id): $channel"
         }
 
-        [void][regex]::new([string]$plugin.assetPattern)
-        if ($plugin.checksumAssetPattern) {
-            [void][regex]::new([string]$plugin.checksumAssetPattern)
+        [void][regex]::new([string]$entry.assetPattern)
+        $checksumPattern = Get-OptionalValue -Object $entry -Name "checksumAssetPattern"
+        if ($checksumPattern) {
+            [void][regex]::new([string]$checksumPattern)
         }
-        foreach ($pattern in @($plugin.installedFilePatterns)) {
+        foreach ($pattern in @(Get-OptionalValue -Object $entry -Name "installedFilePatterns" -Default @())) {
             [void][regex]::new([string]$pattern)
         }
     }
@@ -90,9 +115,9 @@ function Get-CatalogEntry {
         [Parameter(Mandatory)][string]$Reference
     )
 
-    $normalized = Normalize-PluginKey $Reference
+    $key = Normalize-PluginKey $Reference
     $matches = @($Catalog.plugins | Where-Object {
-        (Normalize-PluginKey ([string]$_.id)) -eq $normalized -or
+        (Normalize-PluginKey ([string]$_.id)) -eq $key -or
         ([string]$_.pluginName).Equals($Reference, [System.StringComparison]::OrdinalIgnoreCase)
     })
 
@@ -113,7 +138,8 @@ function Get-PluginJarMetadata {
         throw "Plugin JAR does not exist: $Path"
     }
 
-    $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($resolved)
     try {
         $entry = $archive.GetEntry("paper-plugin.yml")
         if ($null -eq $entry) {
@@ -125,15 +151,14 @@ function Get-PluginJarMetadata {
 
         $reader = [System.IO.StreamReader]::new($entry.Open())
         try {
-            $content = $reader.ReadToEnd()
+            $text = $reader.ReadToEnd()
         }
         finally {
             $reader.Dispose()
         }
 
-        $nameMatch = [regex]::Match($content, '(?m)^\s*name\s*:\s*["'']?([^"''#\r\n]+)')
-        $versionMatch = [regex]::Match($content, '(?m)^\s*version\s*:\s*["'']?([^"''#\r\n]+)')
-
+        $nameMatch = [regex]::Match($text, '(?m)^\s*name\s*:\s*["'']?([^"''#\r\n]+)')
+        $versionMatch = [regex]::Match($text, '(?m)^\s*version\s*:\s*["'']?([^"''#\r\n]+)')
         if (-not $nameMatch.Success) {
             throw "Plugin metadata does not contain a name: $Path"
         }
@@ -142,7 +167,7 @@ function Get-PluginJarMetadata {
             Name = $nameMatch.Groups[1].Value.Trim()
             Version = if ($versionMatch.Success) { $versionMatch.Groups[1].Value.Trim() } else { "unknown" }
             MetadataFile = $entry.FullName
-            Path = (Resolve-Path -LiteralPath $Path).Path
+            Path = $resolved
         }
     }
     finally {
@@ -150,22 +175,20 @@ function Get-PluginJarMetadata {
     }
 }
 
-function Test-FileMatchesCatalogEntry {
+function Test-CatalogFileMatch {
     param(
-        [Parameter(Mandatory)][string]$FileName,
-        [Parameter(Mandatory)]$Entry
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)][string]$FileName
     )
 
     if ($FileName.Equals([string]$Entry.installedFile, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $true
     }
-
-    foreach ($pattern in @($Entry.installedFilePatterns)) {
+    foreach ($pattern in @(Get-OptionalValue -Object $Entry -Name "installedFilePatterns" -Default @())) {
         if ($FileName -match [string]$pattern) {
             return $true
         }
     }
-
     return $false
 }
 
@@ -178,7 +201,7 @@ function Resolve-ManagedIdForJar {
 
     $matches = @($Catalog.plugins | Where-Object {
         ([string]$_.pluginName).Equals($PluginName, [System.StringComparison]::OrdinalIgnoreCase) -or
-        (Test-FileMatchesCatalogEntry -FileName $FileName -Entry $_)
+        (Test-CatalogFileMatch -Entry $_ -FileName $FileName)
     })
 
     if ($matches.Count -eq 1) {
@@ -194,34 +217,33 @@ function Get-InstalledPluginInventory {
         [Parameter(Mandatory)]$Catalog
     )
 
-    $pluginsPath = Join-Path $ServerPath "plugins"
-    $disabledPath = Join-Path $ServerPath "plugins-disabled"
-    $items = New-Object System.Collections.Generic.List[object]
+    $items = @()
+    $sources = @(
+        [pscustomobject]@{ Path = Join-Path $ServerPath "plugins"; Enabled = $true },
+        [pscustomobject]@{ Path = Join-Path $ServerPath "plugins-disabled"; Enabled = $false }
+    )
 
-    foreach ($source in @(
-        @{ Path = $pluginsPath; Enabled = $true },
-        @{ Path = $disabledPath; Enabled = $false }
-    )) {
-        if (-not (Test-Path -LiteralPath $source.Path)) {
+    foreach ($source in $sources) {
+        if (-not (Test-Path -LiteralPath $source.Path -PathType Container)) {
             continue
         }
 
         foreach ($jar in Get-ChildItem -LiteralPath $source.Path -File -Filter "*.jar") {
             try {
                 $metadata = Get-PluginJarMetadata -Path $jar.FullName
-                $pluginName = $metadata.Name
+                $name = $metadata.Name
                 $version = $metadata.Version
                 $metadataError = $null
             }
             catch {
-                $pluginName = [System.IO.Path]::GetFileNameWithoutExtension($jar.Name)
+                $name = [System.IO.Path]::GetFileNameWithoutExtension($jar.Name)
                 $version = "unknown"
                 $metadataError = $_.Exception.Message
             }
 
-            $managedId = Resolve-ManagedIdForJar -Catalog $Catalog -FileName $jar.Name -PluginName $pluginName
-            $items.Add([pscustomobject]@{
-                Name = $pluginName
+            $managedId = Resolve-ManagedIdForJar -Catalog $Catalog -FileName $jar.Name -PluginName $name
+            $items += [pscustomobject]@{
+                Name = $name
                 Version = $version
                 Enabled = [bool]$source.Enabled
                 Managed = ($null -ne $managedId)
@@ -229,11 +251,11 @@ function Get-InstalledPluginInventory {
                 FileName = $jar.Name
                 Path = $jar.FullName
                 MetadataError = $metadataError
-            })
+            }
         }
     }
 
-    return @($items)
+    return $items
 }
 
 function Resolve-InstalledPlugin {
@@ -242,12 +264,12 @@ function Resolve-InstalledPlugin {
         [Parameter(Mandatory)][object[]]$Inventory
     )
 
-    $normalized = Normalize-PluginKey $Reference
+    $key = Normalize-PluginKey $Reference
     $matches = @($Inventory | Where-Object {
-        ($_.ManagedId -and (Normalize-PluginKey ([string]$_.ManagedId)) -eq $normalized) -or
+        ($_.ManagedId -and (Normalize-PluginKey ([string]$_.ManagedId)) -eq $key) -or
         ([string]$_.Name).Equals($Reference, [System.StringComparison]::OrdinalIgnoreCase) -or
         ([string]$_.FileName).Equals($Reference, [System.StringComparison]::OrdinalIgnoreCase) -or
-        (Normalize-PluginKey ([System.IO.Path]::GetFileNameWithoutExtension([string]$_.FileName))) -eq $normalized
+        (Normalize-PluginKey ([System.IO.Path]::GetFileNameWithoutExtension([string]$_.FileName))) -eq $key
     })
 
     if ($matches.Count -eq 0) {
@@ -270,22 +292,22 @@ function Get-GitHubRelease {
 
     if ($Version) {
         $tag = if ($Version.StartsWith("v", [System.StringComparison]::OrdinalIgnoreCase)) { $Version } else { "v$Version" }
-        $encodedTag = [System.Uri]::EscapeDataString($tag)
-        return Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/tags/$encodedTag" -Headers $script:GitHubHeaders -Method Get
+        $encoded = [System.Uri]::EscapeDataString($tag)
+        return Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/tags/$encoded" -Headers $script:GitHubHeaders -Method Get
     }
 
     $releases = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases?per_page=100" -Headers $script:GitHubHeaders -Method Get)
-    $release = if ($Channel -eq "Prerelease") {
+    $selected = if ($Channel -eq "Prerelease") {
         $releases | Where-Object { -not $_.draft -and $_.prerelease } | Select-Object -First 1
     }
     else {
         $releases | Where-Object { -not $_.draft -and -not $_.prerelease } | Select-Object -First 1
     }
 
-    if (-not $release) {
+    if (-not $selected) {
         throw "No $Channel release is available for $Repository."
     }
-    return $release
+    return $selected
 }
 
 function Resolve-ReleaseAsset {
@@ -316,13 +338,13 @@ function Get-ExpectedSha256 {
     )
 
     if ($ChecksumAssetPattern) {
-        $checksumMatches = @($Release.assets | Where-Object { [string]$_.name -match $ChecksumAssetPattern })
-        if ($checksumMatches.Count -gt 1) {
+        $checksumAssets = @($Release.assets | Where-Object { [string]$_.name -match $ChecksumAssetPattern })
+        if ($checksumAssets.Count -gt 1) {
             throw "Release $($Release.tag_name) contains multiple checksum assets matching '$ChecksumAssetPattern'."
         }
-        if ($checksumMatches.Count -eq 1) {
-            $checksumPath = Join-Path $DownloadDirectory ([string]$checksumMatches[0].name)
-            Invoke-WebRequest -Uri $checksumMatches[0].browser_download_url -OutFile $checksumPath -UseBasicParsing
+        if ($checksumAssets.Count -eq 1) {
+            $checksumPath = Join-Path $DownloadDirectory ([string]$checksumAssets[0].name)
+            Invoke-WebRequest -Uri $checksumAssets[0].browser_download_url -OutFile $checksumPath -UseBasicParsing
             $hash = ((Get-Content -LiteralPath $checksumPath -Raw).Trim() -split "\s+")[0].ToLowerInvariant()
             if ($hash -notmatch "^[0-9a-f]{64}$") {
                 throw "Checksum asset contains an invalid SHA-256 value."
@@ -331,7 +353,7 @@ function Get-ExpectedSha256 {
         }
     }
 
-    $digest = [string]$JarAsset.digest
+    $digest = [string](Get-OptionalValue -Object $JarAsset -Name "digest" -Default "")
     if ($digest -match '^sha256:([0-9a-fA-F]{64})$') {
         return $Matches[1].ToLowerInvariant()
     }
@@ -339,67 +361,41 @@ function Get-ExpectedSha256 {
     throw "Release $($Release.tag_name) does not provide a usable SHA-256 checksum or GitHub asset digest."
 }
 
+function Get-ManagerPaths {
+    param([Parameter(Mandatory)][string]$ServerPath)
+
+    $root = Join-Path $ServerPath "deploy\plugin-manager"
+    return [pscustomobject]@{
+        Server = $ServerPath
+        Plugins = Join-Path $ServerPath "plugins"
+        Disabled = Join-Path $ServerPath "plugins-disabled"
+        Root = $root
+        Downloads = Join-Path $root "downloads"
+        Backups = Join-Path $root "backups"
+        State = Join-Path $root "state.json"
+    }
+}
+
+function Ensure-MutationPaths {
+    param([Parameter(Mandatory)]$Paths)
+
+    if (-not (Test-Path -LiteralPath $Paths.Server -PathType Container)) {
+        throw "Minecraft server directory does not exist: $($Paths.Server)"
+    }
+    if (-not (Test-Path -LiteralPath $Paths.Plugins -PathType Container)) {
+        throw "Minecraft plugins directory does not exist: $($Paths.Plugins)"
+    }
+
+    foreach ($path in @($Paths.Disabled, $Paths.Root, $Paths.Downloads, $Paths.Backups)) {
+        New-Item -ItemType Directory -Path $path -Force | Out-Null
+    }
+}
+
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw "Run this command from PowerShell as Administrator."
-    }
-}
-
-function Get-ManagerPaths {
-    param([Parameter(Mandatory)][string]$ServerPath)
-
-    $deployRoot = Join-Path $ServerPath "deploy\plugin-manager"
-    return [pscustomobject]@{
-        Server = $ServerPath
-        Plugins = Join-Path $ServerPath "plugins"
-        Disabled = Join-Path $ServerPath "plugins-disabled"
-        Root = $deployRoot
-        Downloads = Join-Path $deployRoot "downloads"
-        Backups = Join-Path $deployRoot "backups"
-        State = Join-Path $deployRoot "state.json"
-    }
-}
-
-function Ensure-ManagerDirectories {
-    param([Parameter(Mandatory)]$Paths)
-
-    foreach ($path in @($Paths.Plugins, $Paths.Disabled, $Paths.Root, $Paths.Downloads, $Paths.Backups)) {
-        New-Item -ItemType Directory -Path $path -Force | Out-Null
-    }
-}
-
-function Get-ManagerState {
-    param([Parameter(Mandatory)][string]$StatePath)
-
-    $state = Read-JsonHashtable -Path $StatePath
-    if ($null -eq $state) {
-        return [ordered]@{
-            schemaVersion = 1
-            plugins = [ordered]@{}
-        }
-    }
-    if ($state.schemaVersion -ne 1) {
-        throw "Unsupported PluginManager state schema version: $($state.schemaVersion)"
-    }
-    if (-not $state.ContainsKey("plugins")) {
-        $state.plugins = [ordered]@{}
-    }
-    return $state
-}
-
-function Save-ManagerStateBestEffort {
-    param(
-        [Parameter(Mandatory)][string]$StatePath,
-        [Parameter(Mandatory)]$State
-    )
-
-    try {
-        Write-JsonAtomic -Path $StatePath -Value $State
-    }
-    catch {
-        Write-Warning "Plugin deployment succeeded, but PluginManager could not update state: $($_.Exception.Message)"
     }
 }
 
@@ -451,7 +447,9 @@ function Invoke-WithStoppedService {
                 $service.Refresh()
                 Wait-ServiceState -Service $service -Status ([System.ServiceProcess.ServiceControllerStatus]::Stopped)
             }
+
             & $Rollback
+
             if ($wasRunning) {
                 Start-Service -Name $ServiceName
                 $service.Refresh()
@@ -465,55 +463,33 @@ function Invoke-WithStoppedService {
     }
 }
 
-function New-PluginBackup {
-    param(
-        [Parameter(Mandatory)]$Paths,
-        [Parameter(Mandatory)]$InventoryItem,
-        [string]$ReleaseTag,
-        [string]$ManagedId
-    )
+function Get-ManagerState {
+    param([Parameter(Mandatory)][string]$Path)
 
-    $key = if ($ManagedId) { Normalize-PluginKey $ManagedId } else { Normalize-PluginKey $InventoryItem.Name }
-    $backupDirectory = Join-Path $Paths.Backups $key
-    New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
-
-    $timestamp = Get-Date -Format "yyyyMMdd-HHmmssfff"
-    $backupJar = Join-Path $backupDirectory "$timestamp-$($InventoryItem.FileName)"
-    Copy-Item -LiteralPath $InventoryItem.Path -Destination $backupJar -Force
-
-    $metadata = [ordered]@{
-        pluginName = $InventoryItem.Name
-        version = $InventoryItem.Version
-        managedId = $ManagedId
-        originalFileName = $InventoryItem.FileName
-        enabled = [bool]$InventoryItem.Enabled
-        releaseTag = $ReleaseTag
-        createdUtc = [DateTimeOffset]::UtcNow.ToString("O")
+    $state = Read-JsonHashtable -Path $Path
+    if ($null -eq $state) {
+        return [ordered]@{ schemaVersion = 1; plugins = [ordered]@{} }
     }
-    Write-JsonAtomic -Path "$backupJar.json" -Value $metadata
-
-    return $backupJar
+    if ($state.schemaVersion -ne 1) {
+        throw "Unsupported PluginManager state schema version: $($state.schemaVersion)"
+    }
+    if (-not $state.ContainsKey("plugins")) {
+        $state.plugins = [ordered]@{}
+    }
+    return $state
 }
 
-function Remove-OldBackups {
+function Save-ManagerStateBestEffort {
     param(
-        [Parameter(Mandatory)]$Paths,
-        [Parameter(Mandatory)][string]$PluginKey,
-        [ValidateRange(1, 100)][int]$BackupCount
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$State
     )
 
-    $backupDirectory = Join-Path $Paths.Backups (Normalize-PluginKey $PluginKey)
-    if (-not (Test-Path -LiteralPath $backupDirectory)) {
-        return
+    try {
+        Write-JsonAtomic -Path $Path -Value $State
     }
-
-    $old = @(Get-ChildItem -LiteralPath $backupDirectory -File -Filter "*.jar" |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -Skip $BackupCount)
-
-    foreach ($jar in $old) {
-        Remove-Item -LiteralPath $jar.FullName -Force
-        Remove-Item -LiteralPath "$($jar.FullName).json" -Force -ErrorAction SilentlyContinue
+    catch {
+        Write-Warning "Plugin operation succeeded, but PluginManager state could not be updated: $($_.Exception.Message)"
     }
 }
 
@@ -521,7 +497,7 @@ function Get-StateRecord {
     param(
         [Parameter(Mandatory)]$State,
         [string]$ManagedId,
-        [string]$PluginName
+        [Parameter(Mandatory)][string]$PluginName
     )
 
     foreach ($key in @($ManagedId, (Normalize-PluginKey $PluginName))) {
@@ -568,8 +544,57 @@ function Remove-StateRecord {
 
     foreach ($key in @($ManagedId, (Normalize-PluginKey $PluginName))) {
         if ($key -and $State.plugins.ContainsKey($key)) {
-            $State.plugins.Remove($key)
+            [void]$State.plugins.Remove($key)
         }
+    }
+}
+
+function New-PluginBackup {
+    param(
+        [Parameter(Mandatory)]$Paths,
+        [Parameter(Mandatory)]$Item,
+        [string]$ReleaseTag,
+        [string]$ManagedId
+    )
+
+    $key = if ($ManagedId) { Normalize-PluginKey $ManagedId } else { Normalize-PluginKey $Item.Name }
+    $directory = Join-Path $Paths.Backups $key
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmssfff"
+    $backupPath = Join-Path $directory "$timestamp-$($Item.FileName)"
+    Copy-Item -LiteralPath $Item.Path -Destination $backupPath -Force
+
+    Write-JsonAtomic -Path "$backupPath.json" -Value ([ordered]@{
+        pluginName = $Item.Name
+        version = $Item.Version
+        managedId = $ManagedId
+        originalFileName = $Item.FileName
+        enabled = [bool]$Item.Enabled
+        releaseTag = $ReleaseTag
+        createdUtc = [DateTimeOffset]::UtcNow.ToString("O")
+    })
+
+    return $backupPath
+}
+
+function Remove-OldBackups {
+    param(
+        [Parameter(Mandatory)]$Paths,
+        [Parameter(Mandatory)][string]$PluginKey,
+        [ValidateRange(1, 100)][int]$BackupCount
+    )
+
+    $directory = Join-Path $Paths.Backups (Normalize-PluginKey $PluginKey)
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        return
+    }
+
+    foreach ($jar in @(Get-ChildItem -LiteralPath $directory -File -Filter "*.jar" |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip $BackupCount)) {
+        Remove-Item -LiteralPath $jar.FullName -Force
+        Remove-Item -LiteralPath "$($jar.FullName).json" -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -580,26 +605,26 @@ function Invoke-ManagedInstall {
         [Parameter(Mandatory)]$Paths,
         [Parameter(Mandatory)][string]$ServiceName,
         [string]$Version,
-        [ValidateSet("Stable", "Prerelease")][string]$Channel,
+        [string]$Channel,
         [ValidateRange(1, 100)][int]$BackupCount,
         [switch]$DryRun
     )
 
-    $selectedChannel = if ($PSBoundParameters.ContainsKey("Channel") -and $Channel) { $Channel } elseif ($Entry.defaultChannel) { [string]$Entry.defaultChannel } else { "Stable" }
-    Write-Host "==> Resolving $($Entry.pluginName) release"
+    Ensure-MutationPaths -Paths $Paths
+
+    $selectedChannel = if ($Channel) { $Channel } else { [string](Get-OptionalValue -Object $Entry -Name "defaultChannel" -Default "Stable") }
     $release = Get-GitHubRelease -Repository $Entry.repository -Version $Version -Channel $selectedChannel
     $jarAsset = Resolve-ReleaseAsset -Release $release -Pattern $Entry.assetPattern -Purpose "plugin JAR"
 
-    Ensure-ManagerDirectories -Paths $Paths
     $downloadDirectory = Join-Path $Paths.Downloads ([Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $downloadDirectory -Force | Out-Null
 
     try {
         $downloadedJar = Join-Path $downloadDirectory ([string]$jarAsset.name)
-        Write-Host "==> Downloading $($jarAsset.name)"
         Invoke-WebRequest -Uri $jarAsset.browser_download_url -OutFile $downloadedJar -UseBasicParsing
 
-        $expectedHash = Get-ExpectedSha256 -Release $release -JarAsset $jarAsset -ChecksumAssetPattern $Entry.checksumAssetPattern -DownloadDirectory $downloadDirectory
+        $checksumPattern = Get-OptionalValue -Object $Entry -Name "checksumAssetPattern"
+        $expectedHash = Get-ExpectedSha256 -Release $release -JarAsset $jarAsset -ChecksumAssetPattern $checksumPattern -DownloadDirectory $downloadDirectory
         $actualHash = (Get-FileHash -LiteralPath $downloadedJar -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($actualHash -ne $expectedHash) {
             throw "SHA-256 verification failed. Expected $expectedHash, got $actualHash."
@@ -611,36 +636,52 @@ function Invoke-ManagedInstall {
         }
 
         $inventory = Get-InstalledPluginInventory -ServerPath $Paths.Server -Catalog $Catalog
-        $existingMatches = @($inventory | Where-Object {
+        $matches = @($inventory | Where-Object {
             ($_.ManagedId -and ([string]$_.ManagedId).Equals([string]$Entry.id, [System.StringComparison]::OrdinalIgnoreCase)) -or
             ([string]$_.Name).Equals([string]$Entry.pluginName, [System.StringComparison]::OrdinalIgnoreCase)
         })
-        if ($existingMatches.Count -gt 1) {
+        if ($matches.Count -gt 1) {
             throw "Multiple installed JARs match $($Entry.pluginName). Resolve duplicates before continuing."
         }
 
-        $existing = if ($existingMatches.Count -eq 1) { $existingMatches[0] } else { $null }
-        $releaseVersion = ([string]$release.tag_name).TrimStart('v')
+        $existing = if ($matches.Count -eq 1) { $matches[0] } else { $null }
+        $releaseVersion = ([string]$release.tag_name) -replace '^v', ''
         if ($existing -and ([string]$existing.Version).Equals($releaseVersion, [System.StringComparison]::OrdinalIgnoreCase)) {
-            Write-Host "$($Entry.pluginName) $($release.tag_name) is already installed."
-            return
+            return [pscustomobject]@{
+                Action = "none"
+                Name = $metadata.Name
+                Version = $metadata.Version
+                ReleaseTag = $release.tag_name
+                Enabled = $existing.Enabled
+                Path = $existing.Path
+                Changed = $false
+            }
         }
 
         $targetDirectory = if ($existing -and -not $existing.Enabled) { $Paths.Disabled } else { $Paths.Plugins }
         $targetPath = Join-Path $targetDirectory ([string]$Entry.installedFile)
 
         if ($DryRun) {
-            Write-Host "DRY RUN: would install $($release.tag_name) to $targetPath"
-            return
+            return [pscustomobject]@{
+                Action = if ($existing) { "update" } else { "install" }
+                Name = $metadata.Name
+                Version = $metadata.Version
+                ReleaseTag = $release.tag_name
+                Enabled = ($targetDirectory -eq $Paths.Plugins)
+                Path = $targetPath
+                Changed = $false
+                DryRun = $true
+            }
         }
 
         Assert-Administrator
-        $state = Get-ManagerState -StatePath $Paths.State
-        $stateRecord = if ($existing) { Get-StateRecord -State $state -ManagedId $Entry.id -PluginName $existing.Name } else { $null }
-        $backup = if ($existing) { New-PluginBackup -Paths $Paths -InventoryItem $existing -ReleaseTag $stateRecord.releaseTag -ManagedId $Entry.id } else { $null }
+        $state = Get-ManagerState -Path $Paths.State
+        $record = if ($existing) { Get-StateRecord -State $state -ManagedId $Entry.id -PluginName $existing.Name } else { $null }
+        $previousRelease = Get-OptionalValue -Object $record -Name "releaseTag"
+        $backup = if ($existing) { New-PluginBackup -Paths $Paths -Item $existing -ReleaseTag $previousRelease -ManagedId $Entry.id } else { $null }
         $oldPath = if ($existing) { $existing.Path } else { $null }
 
-        $mutation = {
+        Invoke-WithStoppedService -ServiceName $ServiceName -Mutation {
             if ($oldPath -and (Test-Path -LiteralPath $oldPath)) {
                 Remove-Item -LiteralPath $oldPath -Force
             }
@@ -648,9 +689,7 @@ function Invoke-ManagedInstall {
                 throw "Target plugin path already exists: $targetPath"
             }
             Copy-Item -LiteralPath $downloadedJar -Destination $targetPath -Force
-        }
-
-        $rollback = {
+        } -Rollback {
             if (Test-Path -LiteralPath $targetPath) {
                 Remove-Item -LiteralPath $targetPath -Force
             }
@@ -659,14 +698,19 @@ function Invoke-ManagedInstall {
             }
         }
 
-        Write-Host "==> Installing $($Entry.pluginName) $($release.tag_name)"
-        Invoke-WithStoppedService -ServiceName $ServiceName -Mutation $mutation -Rollback $rollback
-
         Set-StateRecord -State $state -Key ([string]$Entry.id) -PluginName $metadata.Name -ManagedId $Entry.id -Repository $Entry.repository -ReleaseTag $release.tag_name -Version $metadata.Version -FileName $Entry.installedFile -Enabled ($targetDirectory -eq $Paths.Plugins) -Sha256 $actualHash
-        Save-ManagerStateBestEffort -StatePath $Paths.State -State $state
+        Save-ManagerStateBestEffort -Path $Paths.State -State $state
         Remove-OldBackups -Paths $Paths -PluginKey $Entry.id -BackupCount $BackupCount
 
-        Write-Host "$($Entry.pluginName) $($release.tag_name) installed successfully."
+        return [pscustomobject]@{
+            Action = if ($existing) { "update" } else { "install" }
+            Name = $metadata.Name
+            Version = $metadata.Version
+            ReleaseTag = $release.tag_name
+            Enabled = ($targetDirectory -eq $Paths.Plugins)
+            Path = $targetPath
+            Changed = $true
+        }
     }
     finally {
         Remove-Item -LiteralPath $downloadDirectory -Recurse -Force -ErrorAction SilentlyContinue
@@ -683,6 +727,7 @@ function Invoke-LocalInstall {
         [switch]$DryRun
     )
 
+    Ensure-MutationPaths -Paths $Paths
     $source = (Resolve-Path -LiteralPath $SourcePath).Path
     $metadata = Get-PluginJarMetadata -Path $source
     $inventory = Get-InstalledPluginInventory -ServerPath $Paths.Server -Catalog $Catalog
@@ -692,25 +737,43 @@ function Invoke-LocalInstall {
     }
 
     $existing = if ($matches.Count -eq 1) { $matches[0] } else { $null }
+    if ($existing -and $source.Equals([string]$existing.Path, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{
+            Action = "none"
+            Name = $metadata.Name
+            Version = $metadata.Version
+            Enabled = $existing.Enabled
+            Path = $existing.Path
+            Changed = $false
+        }
+    }
+
     $safeName = ($metadata.Name -replace '[<>:"/\\|?*]', '_') + ".jar"
     $targetDirectory = if ($existing -and -not $existing.Enabled) { $Paths.Disabled } else { $Paths.Plugins }
     $targetPath = Join-Path $targetDirectory $safeName
-    $actualHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
 
     if ($DryRun) {
-        Write-Host "DRY RUN: would install local $($metadata.Name) $($metadata.Version) to $targetPath"
-        return
+        return [pscustomobject]@{
+            Action = if ($existing) { "update-local" } else { "install-local" }
+            Name = $metadata.Name
+            Version = $metadata.Version
+            Enabled = ($targetDirectory -eq $Paths.Plugins)
+            Path = $targetPath
+            Changed = $false
+            DryRun = $true
+        }
     }
 
     Assert-Administrator
-    Ensure-ManagerDirectories -Paths $Paths
-    $state = Get-ManagerState -StatePath $Paths.State
+    $state = Get-ManagerState -Path $Paths.State
     $managedId = Resolve-ManagedIdForJar -Catalog $Catalog -FileName $safeName -PluginName $metadata.Name
-    $stateRecord = if ($existing) { Get-StateRecord -State $state -ManagedId $managedId -PluginName $existing.Name } else { $null }
-    $backup = if ($existing) { New-PluginBackup -Paths $Paths -InventoryItem $existing -ReleaseTag $stateRecord.releaseTag -ManagedId $managedId } else { $null }
+    $record = if ($existing) { Get-StateRecord -State $state -ManagedId $managedId -PluginName $existing.Name } else { $null }
+    $previousRelease = Get-OptionalValue -Object $record -Name "releaseTag"
+    $backup = if ($existing) { New-PluginBackup -Paths $Paths -Item $existing -ReleaseTag $previousRelease -ManagedId $managedId } else { $null }
     $oldPath = if ($existing) { $existing.Path } else { $null }
 
-    $mutation = {
+    Invoke-WithStoppedService -ServiceName $ServiceName -Mutation {
         if ($oldPath -and (Test-Path -LiteralPath $oldPath)) {
             Remove-Item -LiteralPath $oldPath -Force
         }
@@ -718,9 +781,7 @@ function Invoke-LocalInstall {
             throw "Target plugin path already exists: $targetPath"
         }
         Copy-Item -LiteralPath $source -Destination $targetPath -Force
-    }
-
-    $rollback = {
+    } -Rollback {
         if (Test-Path -LiteralPath $targetPath) {
             Remove-Item -LiteralPath $targetPath -Force
         }
@@ -729,15 +790,21 @@ function Invoke-LocalInstall {
         }
     }
 
-    Invoke-WithStoppedService -ServiceName $ServiceName -Mutation $mutation -Rollback $rollback
-
+    $catalogEntry = if ($managedId) { Get-CatalogEntry -Catalog $Catalog -Reference $managedId } else { $null }
+    $repository = Get-OptionalValue -Object $catalogEntry -Name "repository"
     $key = if ($managedId) { $managedId } else { Normalize-PluginKey $metadata.Name }
-    $entry = if ($managedId) { Get-CatalogEntry -Catalog $Catalog -Reference $managedId } else { $null }
-    Set-StateRecord -State $state -Key $key -PluginName $metadata.Name -ManagedId $managedId -Repository $entry.repository -ReleaseTag $null -Version $metadata.Version -FileName $safeName -Enabled ($targetDirectory -eq $Paths.Plugins) -Sha256 $actualHash
-    Save-ManagerStateBestEffort -StatePath $Paths.State -State $state
+    Set-StateRecord -State $state -Key $key -PluginName $metadata.Name -ManagedId $managedId -Repository $repository -ReleaseTag $null -Version $metadata.Version -FileName $safeName -Enabled ($targetDirectory -eq $Paths.Plugins) -Sha256 $hash
+    Save-ManagerStateBestEffort -Path $Paths.State -State $state
     Remove-OldBackups -Paths $Paths -PluginKey $key -BackupCount $BackupCount
 
-    Write-Host "$($metadata.Name) $($metadata.Version) installed successfully from local JAR."
+    return [pscustomobject]@{
+        Action = if ($existing) { "update-local" } else { "install-local" }
+        Name = $metadata.Name
+        Version = $metadata.Version
+        Enabled = ($targetDirectory -eq $Paths.Plugins)
+        Path = $targetPath
+        Changed = $true
+    }
 }
 
 function Invoke-RemovePlugin {
@@ -754,15 +821,14 @@ function Invoke-RemovePlugin {
         throw "Remove requires -Force. Plugin data directories are still preserved."
     }
     if ($DryRun) {
-        Write-Host "DRY RUN: would remove $($Item.Path) and preserve its data directory."
-        return
+        return [pscustomobject]@{ Action = "remove"; Name = $Item.Name; Path = $Item.Path; Changed = $false; DryRun = $true }
     }
 
+    Ensure-MutationPaths -Paths $Paths
     Assert-Administrator
-    Ensure-ManagerDirectories -Paths $Paths
-    $state = Get-ManagerState -StatePath $Paths.State
+    $state = Get-ManagerState -Path $Paths.State
     $record = Get-StateRecord -State $state -ManagedId $Item.ManagedId -PluginName $Item.Name
-    $backup = New-PluginBackup -Paths $Paths -InventoryItem $Item -ReleaseTag $record.releaseTag -ManagedId $Item.ManagedId
+    $backup = New-PluginBackup -Paths $Paths -Item $Item -ReleaseTag (Get-OptionalValue -Object $record -Name "releaseTag") -ManagedId $Item.ManagedId
     $oldPath = $Item.Path
 
     Invoke-WithStoppedService -ServiceName $ServiceName -Mutation {
@@ -774,9 +840,11 @@ function Invoke-RemovePlugin {
     }
 
     Remove-StateRecord -State $state -ManagedId $Item.ManagedId -PluginName $Item.Name
-    Save-ManagerStateBestEffort -StatePath $Paths.State -State $state
-    Remove-OldBackups -Paths $Paths -PluginKey $(if ($Item.ManagedId) { $Item.ManagedId } else { $Item.Name }) -BackupCount $BackupCount
-    Write-Host "$($Item.Name) removed. Plugin data was preserved."
+    Save-ManagerStateBestEffort -Path $Paths.State -State $state
+    $key = if ($Item.ManagedId) { $Item.ManagedId } else { $Item.Name }
+    Remove-OldBackups -Paths $Paths -PluginKey $key -BackupCount $BackupCount
+
+    return [pscustomobject]@{ Action = "remove"; Name = $Item.Name; Path = $oldPath; Changed = $true }
 }
 
 function Invoke-SetPluginEnabled {
@@ -789,21 +857,18 @@ function Invoke-SetPluginEnabled {
     )
 
     if ($Item.Enabled -eq $Enabled) {
-        Write-Host "$($Item.Name) is already $(if ($Enabled) { 'enabled' } else { 'disabled' })."
-        return
+        return [pscustomobject]@{ Action = "none"; Name = $Item.Name; Enabled = $Enabled; Path = $Item.Path; Changed = $false }
     }
 
+    Ensure-MutationPaths -Paths $Paths
     $targetDirectory = if ($Enabled) { $Paths.Plugins } else { $Paths.Disabled }
-    Ensure-ManagerDirectories -Paths $Paths
     $targetPath = Join-Path $targetDirectory $Item.FileName
-
     if (Test-Path -LiteralPath $targetPath) {
         throw "Cannot change plugin state because target JAR already exists: $targetPath"
     }
 
     if ($DryRun) {
-        Write-Host "DRY RUN: would move $($Item.Path) to $targetPath"
-        return
+        return [pscustomobject]@{ Action = if ($Enabled) { "enable" } else { "disable" }; Name = $Item.Name; Enabled = $Enabled; Path = $targetPath; Changed = $false; DryRun = $true }
     }
 
     Assert-Administrator
@@ -816,16 +881,16 @@ function Invoke-SetPluginEnabled {
         }
     }
 
-    $state = Get-ManagerState -StatePath $Paths.State
+    $state = Get-ManagerState -Path $Paths.State
     $record = Get-StateRecord -State $state -ManagedId $Item.ManagedId -PluginName $Item.Name
     if ($record) {
         $record.enabled = $Enabled
         $record.fileName = $Item.FileName
         $record.updatedUtc = [DateTimeOffset]::UtcNow.ToString("O")
-        Save-ManagerStateBestEffort -StatePath $Paths.State -State $state
+        Save-ManagerStateBestEffort -Path $Paths.State -State $state
     }
 
-    Write-Host "$($Item.Name) $(if ($Enabled) { 'enabled' } else { 'disabled' }) successfully."
+    return [pscustomobject]@{ Action = if ($Enabled) { "enable" } else { "disable" }; Name = $Item.Name; Enabled = $Enabled; Path = $targetPath; Changed = $true }
 }
 
 function Invoke-RollbackPlugin {
@@ -838,46 +903,46 @@ function Invoke-RollbackPlugin {
         [switch]$DryRun
     )
 
+    Ensure-MutationPaths -Paths $Paths
     $inventory = Get-InstalledPluginInventory -ServerPath $Paths.Server -Catalog $Catalog
     $current = Resolve-InstalledPlugin -Reference $Reference -Inventory $inventory
     $entry = Get-CatalogEntry -Catalog $Catalog -Reference $Reference
     $key = if ($current -and $current.ManagedId) { $current.ManagedId } elseif ($entry) { $entry.id } elseif ($current) { Normalize-PluginKey $current.Name } else { Normalize-PluginKey $Reference }
-    $backupDirectory = Join-Path $Paths.Backups (Normalize-PluginKey $key)
+    $directory = Join-Path $Paths.Backups (Normalize-PluginKey $key)
 
-    if (-not (Test-Path -LiteralPath $backupDirectory)) {
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
         throw "No backups exist for $Reference."
     }
 
-    $backup = Get-ChildItem -LiteralPath $backupDirectory -File -Filter "*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $backup = Get-ChildItem -LiteralPath $directory -File -Filter "*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $backup) {
         throw "No backups exist for $Reference."
     }
 
-    $metadataPath = "$($backup.FullName).json"
-    if (-not (Test-Path -LiteralPath $metadataPath)) {
-        throw "Backup metadata is missing: $metadataPath"
+    $backupMetadata = Read-JsonHashtable -Path "$($backup.FullName).json"
+    if ($null -eq $backupMetadata) {
+        throw "Backup metadata is missing for $($backup.FullName)."
     }
-    $backupMetadata = Read-JsonHashtable -Path $metadataPath
+
     $targetDirectory = if ([bool]$backupMetadata.enabled) { $Paths.Plugins } else { $Paths.Disabled }
     $targetPath = Join-Path $targetDirectory ([string]$backupMetadata.originalFileName)
 
     if ($DryRun) {
-        Write-Host "DRY RUN: would restore $($backup.FullName) to $targetPath"
-        return
+        return [pscustomobject]@{ Action = "rollback"; Name = $backupMetadata.pluginName; Version = $backupMetadata.version; Path = $targetPath; Changed = $false; DryRun = $true }
     }
 
     Assert-Administrator
-    Ensure-ManagerDirectories -Paths $Paths
-    $currentBackup = if ($current) {
-        $state = Get-ManagerState -StatePath $Paths.State
-        $currentRecord = Get-StateRecord -State $state -ManagedId $current.ManagedId -PluginName $current.Name
-        New-PluginBackup -Paths $Paths -InventoryItem $current -ReleaseTag $currentRecord.releaseTag -ManagedId $current.ManagedId
-    } else { $null }
+    $state = Get-ManagerState -Path $Paths.State
+    $currentRecord = if ($current) { Get-StateRecord -State $state -ManagedId $current.ManagedId -PluginName $current.Name } else { $null }
+    $currentBackup = if ($current) { New-PluginBackup -Paths $Paths -Item $current -ReleaseTag (Get-OptionalValue -Object $currentRecord -Name "releaseTag") -ManagedId $current.ManagedId } else { $null }
     $currentPath = if ($current) { $current.Path } else { $null }
 
     Invoke-WithStoppedService -ServiceName $ServiceName -Mutation {
         if ($currentPath -and (Test-Path -LiteralPath $currentPath)) {
             Remove-Item -LiteralPath $currentPath -Force
+        }
+        if (Test-Path -LiteralPath $targetPath) {
+            throw "Rollback target already exists: $targetPath"
         }
         Copy-Item -LiteralPath $backup.FullName -Destination $targetPath -Force
     } -Rollback {
@@ -889,17 +954,17 @@ function Invoke-RollbackPlugin {
         }
     }
 
-    $restoredMetadata = Get-PluginJarMetadata -Path $targetPath
-    $state = Get-ManagerState -StatePath $Paths.State
-    $managedId = [string]$backupMetadata.managedId
+    $restored = Get-PluginJarMetadata -Path $targetPath
+    $managedId = [string](Get-OptionalValue -Object $backupMetadata -Name "managedId" -Default "")
     $catalogEntry = if ($managedId) { Get-CatalogEntry -Catalog $Catalog -Reference $managedId } else { $null }
-    $stateKey = if ($managedId) { $managedId } else { Normalize-PluginKey $restoredMetadata.Name }
+    $repository = Get-OptionalValue -Object $catalogEntry -Name "repository"
+    $stateKey = if ($managedId) { $managedId } else { Normalize-PluginKey $restored.Name }
     $hash = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    Set-StateRecord -State $state -Key $stateKey -PluginName $restoredMetadata.Name -ManagedId $managedId -Repository $catalogEntry.repository -ReleaseTag $backupMetadata.releaseTag -Version $restoredMetadata.Version -FileName ([System.IO.Path]::GetFileName($targetPath)) -Enabled ([bool]$backupMetadata.enabled) -Sha256 $hash
-    Save-ManagerStateBestEffort -StatePath $Paths.State -State $state
+    Set-StateRecord -State $state -Key $stateKey -PluginName $restored.Name -ManagedId $managedId -Repository $repository -ReleaseTag (Get-OptionalValue -Object $backupMetadata -Name "releaseTag") -Version $restored.Version -FileName ([System.IO.Path]::GetFileName($targetPath)) -Enabled ([bool]$backupMetadata.enabled) -Sha256 $hash
+    Save-ManagerStateBestEffort -Path $Paths.State -State $state
     Remove-OldBackups -Paths $Paths -PluginKey $key -BackupCount $BackupCount
 
-    Write-Host "$($restoredMetadata.Name) rolled back to version $($restoredMetadata.Version)."
+    return [pscustomobject]@{ Action = "rollback"; Name = $restored.Name; Version = $restored.Version; Path = $targetPath; Changed = $true }
 }
 
 function Get-PluginStatusObject {
@@ -907,19 +972,19 @@ function Get-PluginStatusObject {
         [Parameter(Mandatory)][string]$Reference,
         [Parameter(Mandatory)]$Catalog,
         [Parameter(Mandatory)]$Paths,
-        [ValidateSet("Stable", "Prerelease")][string]$Channel
+        [string]$Channel
     )
 
     $inventory = Get-InstalledPluginInventory -ServerPath $Paths.Server -Catalog $Catalog
     $installed = Resolve-InstalledPlugin -Reference $Reference -Inventory $inventory
     $entry = Get-CatalogEntry -Catalog $Catalog -Reference $Reference
 
-    $releaseTag = $null
+    $latest = $null
     $releaseError = $null
     if ($entry) {
-        $selectedChannel = if ($Channel) { $Channel } elseif ($entry.defaultChannel) { [string]$entry.defaultChannel } else { "Stable" }
+        $selectedChannel = if ($Channel) { $Channel } else { [string](Get-OptionalValue -Object $entry -Name "defaultChannel" -Default "Stable") }
         try {
-            $releaseTag = (Get-GitHubRelease -Repository $entry.repository -Channel $selectedChannel).tag_name
+            $latest = (Get-GitHubRelease -Repository $entry.repository -Channel $selectedChannel).tag_name
         }
         catch {
             $releaseError = $_.Exception.Message
@@ -934,9 +999,9 @@ function Get-PluginStatusObject {
         InstalledVersion = if ($installed) { $installed.Version } else { $null }
         FileName = if ($installed) { $installed.FileName } else { $null }
         Managed = ($null -ne $entry)
-        ManagedId = if ($entry) { $entry.id } else { $installed.ManagedId }
+        ManagedId = if ($entry) { $entry.id } elseif ($installed) { $installed.ManagedId } else { $null }
         Repository = if ($entry) { $entry.repository } else { $null }
-        LatestRelease = $releaseTag
+        LatestRelease = $latest
         ReleaseError = $releaseError
     }
 }
@@ -967,7 +1032,7 @@ function Invoke-PluginManager {
                     Id = $_.id
                     Name = $_.pluginName
                     Repository = $_.repository
-                    DefaultChannel = if ($_.defaultChannel) { $_.defaultChannel } else { "Stable" }
+                    DefaultChannel = Get-OptionalValue -Object $_ -Name "defaultChannel" -Default "Stable"
                 }
             })
         }
@@ -982,73 +1047,41 @@ function Invoke-PluginManager {
             if (-not $Plugin) { throw "install requires a managed plugin id or name." }
             $entry = Get-CatalogEntry -Catalog $catalog -Reference $Plugin
             if (-not $entry) { throw "Plugin '$Plugin' is not in the managed catalog. Use install-file for a local JAR." }
-            $parameters = @{
-                Entry = $entry
-                Catalog = $catalog
-                Paths = $paths
-                ServiceName = $ServiceName
-                Version = $Version
-                BackupCount = $BackupCount
-                DryRun = $DryRun
-            }
-            if ($Channel) { $parameters.Channel = $Channel }
-            Invoke-ManagedInstall @parameters
-            return
+            return Invoke-ManagedInstall -Entry $entry -Catalog $catalog -Paths $paths -ServiceName $ServiceName -Version $Version -Channel $Channel -BackupCount $BackupCount -DryRun:$DryRun
         }
         "update" {
             if (-not $Plugin) { throw "update requires a managed plugin id or name." }
             $entry = Get-CatalogEntry -Catalog $catalog -Reference $Plugin
             if (-not $entry) { throw "Plugin '$Plugin' is not in the managed catalog and cannot be updated automatically." }
             $inventory = Get-InstalledPluginInventory -ServerPath $ServerPath -Catalog $catalog
-            if (-not (Resolve-InstalledPlugin -Reference $Plugin -Inventory $inventory)) {
-                throw "Plugin '$Plugin' is not installed. Use install first."
-            }
-            $parameters = @{
-                Entry = $entry
-                Catalog = $catalog
-                Paths = $paths
-                ServiceName = $ServiceName
-                Version = $Version
-                BackupCount = $BackupCount
-                DryRun = $DryRun
-            }
-            if ($Channel) { $parameters.Channel = $Channel }
-            Invoke-ManagedInstall @parameters
-            return
+            if (-not (Resolve-InstalledPlugin -Reference $Plugin -Inventory $inventory)) { throw "Plugin '$Plugin' is not installed. Use install first." }
+            return Invoke-ManagedInstall -Entry $entry -Catalog $catalog -Paths $paths -ServiceName $ServiceName -Version $Version -Channel $Channel -BackupCount $BackupCount -DryRun:$DryRun
         }
         "install-file" {
             if (-not $Path) { throw "install-file requires -Path <jar>." }
-            Invoke-LocalInstall -SourcePath $Path -Catalog $catalog -Paths $paths -ServiceName $ServiceName -BackupCount $BackupCount -DryRun:$DryRun
-            return
+            return Invoke-LocalInstall -SourcePath $Path -Catalog $catalog -Paths $paths -ServiceName $ServiceName -BackupCount $BackupCount -DryRun:$DryRun
         }
         "remove" {
             if (-not $Plugin) { throw "remove requires a plugin reference." }
-            $inventory = Get-InstalledPluginInventory -ServerPath $ServerPath -Catalog $catalog
-            $item = Resolve-InstalledPlugin -Reference $Plugin -Inventory $inventory
+            $item = Resolve-InstalledPlugin -Reference $Plugin -Inventory (Get-InstalledPluginInventory -ServerPath $ServerPath -Catalog $catalog)
             if (-not $item) { throw "Plugin '$Plugin' is not installed or disabled." }
-            Invoke-RemovePlugin -Item $item -Paths $paths -ServiceName $ServiceName -BackupCount $BackupCount -DryRun:$DryRun -Force:$Force
-            return
+            return Invoke-RemovePlugin -Item $item -Paths $paths -ServiceName $ServiceName -BackupCount $BackupCount -DryRun:$DryRun -Force:$Force
         }
         "disable" {
             if (-not $Plugin) { throw "disable requires a plugin reference." }
-            $inventory = Get-InstalledPluginInventory -ServerPath $ServerPath -Catalog $catalog
-            $item = Resolve-InstalledPlugin -Reference $Plugin -Inventory $inventory
+            $item = Resolve-InstalledPlugin -Reference $Plugin -Inventory (Get-InstalledPluginInventory -ServerPath $ServerPath -Catalog $catalog)
             if (-not $item) { throw "Plugin '$Plugin' is not installed." }
-            Invoke-SetPluginEnabled -Item $item -Paths $paths -ServiceName $ServiceName -Enabled $false -DryRun:$DryRun
-            return
+            return Invoke-SetPluginEnabled -Item $item -Paths $paths -ServiceName $ServiceName -Enabled $false -DryRun:$DryRun
         }
         "enable" {
             if (-not $Plugin) { throw "enable requires a plugin reference." }
-            $inventory = Get-InstalledPluginInventory -ServerPath $ServerPath -Catalog $catalog
-            $item = Resolve-InstalledPlugin -Reference $Plugin -Inventory $inventory
+            $item = Resolve-InstalledPlugin -Reference $Plugin -Inventory (Get-InstalledPluginInventory -ServerPath $ServerPath -Catalog $catalog)
             if (-not $item) { throw "Plugin '$Plugin' is not installed." }
-            Invoke-SetPluginEnabled -Item $item -Paths $paths -ServiceName $ServiceName -Enabled $true -DryRun:$DryRun
-            return
+            return Invoke-SetPluginEnabled -Item $item -Paths $paths -ServiceName $ServiceName -Enabled $true -DryRun:$DryRun
         }
         "rollback" {
             if (-not $Plugin) { throw "rollback requires a plugin reference." }
-            Invoke-RollbackPlugin -Reference $Plugin -Catalog $catalog -Paths $paths -ServiceName $ServiceName -BackupCount $BackupCount -DryRun:$DryRun
-            return
+            return Invoke-RollbackPlugin -Reference $Plugin -Catalog $catalog -Paths $paths -ServiceName $ServiceName -BackupCount $BackupCount -DryRun:$DryRun
         }
     }
 }
