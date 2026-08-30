@@ -124,43 +124,49 @@ switch ($Command) {
         if (-not $Plugin) {
             throw "remove requires a plugin reference."
         }
-        $result = Invoke-DependencyGuardedMutation \
-            -Catalog $catalog \
-            -Command remove \
-            -Plugin $Plugin \
-            -ServerPath $ServerPath \
-            -ServiceName $ServiceName \
-            -CatalogPath $CatalogPath \
-            -BackupCount $BackupCount \
-            -DryRun:$DryRun \
-            -Force:$Force
+        $parameters = @{
+            Catalog = $catalog
+            Command = "remove"
+            Plugin = $Plugin
+            ServerPath = $ServerPath
+            ServiceName = $ServiceName
+            CatalogPath = $CatalogPath
+            BackupCount = $BackupCount
+            DryRun = $DryRun
+            Force = $Force
+        }
+        $result = Invoke-DependencyGuardedMutation @parameters
     }
     "disable" {
         if (-not $Plugin) {
             throw "disable requires a plugin reference."
         }
-        $result = Invoke-DependencyGuardedMutation \
-            -Catalog $catalog \
-            -Command disable \
-            -Plugin $Plugin \
-            -ServerPath $ServerPath \
-            -ServiceName $ServiceName \
-            -CatalogPath $CatalogPath \
-            -BackupCount $BackupCount \
-            -DryRun:$DryRun
+        $parameters = @{
+            Catalog = $catalog
+            Command = "disable"
+            Plugin = $Plugin
+            ServerPath = $ServerPath
+            ServiceName = $ServiceName
+            CatalogPath = $CatalogPath
+            BackupCount = $BackupCount
+            DryRun = $DryRun
+        }
+        $result = Invoke-DependencyGuardedMutation @parameters
     }
     "enable" {
         if (-not $Plugin) {
             throw "enable requires a plugin reference."
         }
-        $result = Invoke-DependencyAwareEnable \
-            -Catalog $catalog \
-            -Plugin $Plugin \
-            -ServerPath $ServerPath \
-            -ServiceName $ServiceName \
-            -CatalogPath $CatalogPath \
-            -BackupCount $BackupCount \
-            -DryRun:$DryRun
+        $parameters = @{
+            Catalog = $catalog
+            Plugin = $Plugin
+            ServerPath = $ServerPath
+            ServiceName = $ServiceName
+            CatalogPath = $CatalogPath
+            BackupCount = $BackupCount
+            DryRun = $DryRun
+        }
+        $result = Invoke-DependencyAwareEnable @parameters
     }
     default {
         $result = Invoke-PluginManager @coreParameters
