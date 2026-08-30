@@ -13,32 +13,6 @@
         "^sanctuary[-.].*\\.jar$"
       ],
       "defaultChannel": "Prerelease"
-    },
-    {
-      "id": "extendeditems",
-      "pluginName": "ExtendedItems",
-      "repository": "liamtolkki/ExtendedItems",
-      "assetPattern": "^extendeditems-.*\\.jar$",
-      "checksumAssetPattern": null,
-      "installedFile": "ExtendedItems.jar",
-      "installedFilePatterns": [
-        "^ExtendedItems\\.jar$",
-        "^extendeditems[-.].*\\.jar$"
-      ],
-      "defaultChannel": "Prerelease"
-    },
-    {
-      "id": "extendedui",
-      "pluginName": "ExtendedUI",
-      "repository": "liamtolkki/ExtendedUI",
-      "assetPattern": "^extendedui-.*\\.jar$",
-      "checksumAssetPattern": null,
-      "installedFile": "ExtendedUI.jar",
-      "installedFilePatterns": [
-        "^ExtendedUI\\.jar$",
-        "^extendedui[-.].*\\.jar$"
-      ],
-      "defaultChannel": "Stable"
     }
   ]
 }
