@@ -41,8 +41,8 @@ jobs:
       - name: Validate Windows PowerShell 5.1 compatibility
         shell: powershell
         run: |
-          Import-Module .\PluginManager.psm1 -Force
           Import-Module .\PluginManager.Orchestration.psm1 -Force
+          Import-Module .\PluginManager.psm1 -Force
 
           $catalog = Get-PluginCatalog -CatalogPath .\plugins.json
           Assert-CatalogDependencyGraph -Catalog $catalog
