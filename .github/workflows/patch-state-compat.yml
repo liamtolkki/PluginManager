@@ -31,14 +31,14 @@ jobs:
             '        return $null'
             '    }'
             '    if ($Value -is [System.Collections.IDictionary]) {'
-            '        $result = [ordered]@{}'
+            '        $result = @{}'
             '        foreach ($key in $Value.Keys) {'
             '            $result[[string]$key] = ConvertTo-PluginManagerHashtable $Value[$key]'
             '        }'
             '        return $result'
             '    }'
             '    if ($Value -is [System.Management.Automation.PSCustomObject]) {'
-            '        $result = [ordered]@{}'
+            '        $result = @{}'
             '        foreach ($property in $Value.PSObject.Properties) {'
             '            $result[$property.Name] = ConvertTo-PluginManagerHashtable $property.Value'
             '        }'
@@ -74,6 +74,14 @@ jobs:
           }
 
           $content = $regex.Replace($content, $replacement, 1)
+          $content = $content.Replace(
+            'return [ordered]@{ schemaVersion = 1; plugins = [ordered]@{} }',
+            'return @{ schemaVersion = 1; plugins = @{} }'
+          )
+          $content = $content.Replace(
+            '$state.plugins = [ordered]@{}',
+            '$state.plugins = @{}'
+          )
           Set-Content -Path $path -Value $content -Encoding utf8
 
       - name: Validate Windows PowerShell 5.1 state parsing
@@ -90,6 +98,12 @@ jobs:
             }
             if ($state.plugins['sanctuary'].version -ne '0.1.0-alpha.1') {
               throw 'Unexpected Sanctuary state version.'
+            }
+
+            $missing = Join-Path (Split-Path -Parent $StatePath) 'missing.json'
+            $empty = Get-ManagerState -Path $missing
+            if (-not $empty.plugins.ContainsKey('anything')) {
+              $empty.plugins['anything'] = @{ version = 'test' }
             }
           } $path
 
