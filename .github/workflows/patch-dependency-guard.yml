@@ -21,28 +21,31 @@ jobs:
         run: |
           $path = "PluginManager.Orchestration.psm1"
           $content = Get-Content -Path $path -Raw
-          $old = @'
-    $dependents = if ($Operation -eq "disable") {
-        @(Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId -EnabledOnly)
-    }
-    else {
-        @(Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId)
-    }
-'@
-          $new = @'
-    $dependents = @(if ($Operation -eq "disable") {
-        Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId -EnabledOnly
-    }
-    else {
-        Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId
-    })
-'@
 
-          if (-not $content.Contains($old.TrimStart("`r", "`n"))) {
+          $old = @(
+            '    $dependents = if ($Operation -eq "disable") {'
+            '        @(Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId -EnabledOnly)'
+            '    }'
+            '    else {'
+            '        @(Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId)'
+            '    }'
+          ) -join "`n"
+
+          $new = @(
+            '    $dependents = @(if ($Operation -eq "disable") {'
+            '        Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId -EnabledOnly'
+            '    }'
+            '    else {'
+            '        Get-InstalledDependents -Catalog $Catalog -Inventory $Inventory -ManagedId $Item.ManagedId'
+            '    })'
+          ) -join "`n"
+
+          $normalized = $content.Replace("`r`n", "`n")
+          if (-not $normalized.Contains($old)) {
             throw "Expected dependency guard implementation was not found."
           }
-          $content = $content.Replace($old.TrimStart("`r", "`n"), $new.TrimStart("`r", "`n"))
-          Set-Content -Path $path -Value $content -Encoding utf8
+          $normalized = $normalized.Replace($old, $new)
+          Set-Content -Path $path -Value $normalized -Encoding utf8
 
       - name: Run Pester
         shell: pwsh
