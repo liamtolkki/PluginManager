@@ -19,33 +19,41 @@ jobs:
         shell: pwsh
         run: |
           $files = @(
-            "plugin-manager.ps1",
-            "PluginManager.psm1",
-            "tests/PluginManager.Tests.ps1"
+            Get-ChildItem -Path . -Recurse -File |
+              Where-Object { $_.Extension -in @('.ps1', '.psm1') }
           )
 
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $file),
+              $file.FullName,
               [ref]$tokens,
               [ref]$errors
             )
 
             if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error $_.Message }
-              throw "PowerShell syntax validation failed for $file"
+              $errors | ForEach-Object { Write-Error "$($file.FullName): $($_.Message)" }
+              throw "PowerShell syntax validation failed for $($file.FullName)"
             }
           }
 
-      - name: Validate Windows PowerShell 5.1 release selection
+      - name: Validate Windows PowerShell 5.1 compatibility
         shell: powershell
         run: |
           Import-Module .\PluginManager.psm1 -Force
-          $release = Get-GitHubRelease -Repository "liamtolkki/ExtendedItems" -Channel Prerelease
+          Import-Module .\PluginManager.Orchestration.psm1 -Force
+
+          $catalog = Get-PluginCatalog -CatalogPath .\plugins.json
+          Assert-CatalogDependencyGraph -Catalog $catalog
+          $order = @(Get-DependencyOrder -Catalog $catalog)
+          if ($order -notcontains 'sanctuary') {
+            throw 'Expected Sanctuary in dependency order.'
+          }
+
+          $release = Get-GitHubRelease -Repository "liamtolkki/Sanctuary" -Channel Prerelease
           if (-not $release.prerelease) {
-            throw "Expected an ExtendedItems prerelease."
+            throw "Expected a Sanctuary prerelease."
           }
           Write-Host "Selected $($release.tag_name)"
 
